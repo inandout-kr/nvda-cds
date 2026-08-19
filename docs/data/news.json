@@ -1,0 +1,46 @@
+{
+  "items": [
+    {
+      "date": "2026-07-29",
+      "text": "NVDA 5Y CDS, 사상 최고 83.7BP 기록 — 계약 활성화 이래 최대폭 확대",
+      "src": "BLOOMBERG",
+      "url": "https://www.investing.com/news/stock-market-news/nvidias-rising-cds-the-talk-of-wall-street-amid-circular-financing-fears-4816626"
+    },
+    {
+      "date": "2026-07-28",
+      "text": "ORACLE CDS 사이클 최고 경신, 테크 크레딧 리스크 섹터 전반 확산",
+      "src": "SEEKING ALPHA",
+      "url": "https://seekingalpha.com/news/4615543-tech-credit-risk-rises-as-oracle-cds-hits-cycle-high-nvidia-spreads-widen"
+    },
+    {
+      "date": "2026-07-28",
+      "text": "NVDA CDS 상승으로 대차대조표 리스크 부각 — AI 인프라 부채 보증 구조 주목",
+      "src": "TRADINGPEDIA",
+      "url": "https://www.tradingpedia.com/2026/07/28/nvidia-cds-climb-brings-balance-sheet-risk-into-view/"
+    },
+    {
+      "date": "2026-07-27",
+      "text": "NVDA CDS 급등, 순환 금융(CIRCULAR FINANCING) 우려로 월가 최대 화두 부상",
+      "src": "INVESTING.COM",
+      "url": "https://www.investing.com/news/stock-market-news/nvidias-rising-cds-the-talk-of-wall-street-amid-circular-financing-fears-4816626"
+    },
+    {
+      "date": "2026-07-27",
+      "text": "NVDA, 7,500억 달러 규모 AI 커미트먼트 준비 보도 — SK그룹 5,000억+ / OPENAI 컴퓨팅 리스 보증 최대 2,500억",
+      "src": "BLOOMBERG",
+      "url": "https://finance.yahoo.com/markets/stocks/articles/nvidia-rising-cds-talk-wall-123955612.html"
+    },
+    {
+      "date": "2026-07-27",
+      "text": "NVDA 주가 5% 하락, CDS 스프레드 동반 확대 — AI 투자 자금조달과 회수의 사각지대",
+      "src": "MOOMOO",
+      "url": "https://www.moomoo.com/community/feed/nvidia-shares-fall-5-cds-spreads-surge-blind-spots-in-116996426170374"
+    },
+    {
+      "date": "2025-11-20",
+      "text": "NVDA 5Y CDS 단일종목 계약 체결 개시 — DTCC 공개 보고 최초 관측",
+      "src": "DTCC SDR",
+      "url": "https://pddata.dtcc.com/ppd/"
+    }
+  ]
+}

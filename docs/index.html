@@ -3,304 +3,450 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NVIDIA CDS 프리미엄 트래커</title>
-<meta name="description" content="DTCC 공개 스왑 체결 데이터로 산출한 엔비디아 및 AI 크레딧 5년 CDS 스프레드">
+<title>NVDA 5Y CDS MONITOR</title>
+<meta name="description" content="NVIDIA 5-Year Credit Default Swap monitor built on DTCC public swap dissemination data">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: { extend: {
+      colors: { amber: { term: "#FFB000" }, grid: "#232323", up: "#00FF00", dn: "#FF0000" },
+      fontFamily: { mono: ['ui-monospace','Cascadia Mono','Roboto Mono','Consolas','Courier New','monospace'] }
+    } }
+  };
+</script>
 <style>
-  :root{
-    --bg:#0b0e13; --panel:#141922; --panel2:#1b2230; --line:#232c3b;
-    --text:#e6ebf2; --dim:#8b97a8; --faint:#5d6878;
-    --nv:#76b900; --up:#ff5c5c; --down:#3ddc84;
-    --mono:ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
-  }
-  *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--text);
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Malgun Gothic","Apple SD Gothic Neo",sans-serif;
-    line-height:1.5;-webkit-font-smoothing:antialiased}
-  a{color:var(--nv)}
-  .wrap{max-width:1080px;margin:0 auto;padding:28px 18px 60px}
-  header{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;margin-bottom:24px}
-  h1{font-size:19px;margin:0;font-weight:600;letter-spacing:-.2px}
-  h1 span{color:var(--nv)}
-  .stamp{font-size:12px;color:var(--faint);font-family:var(--mono)}
-  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px}
-
-  /* headline */
-  .hero{padding:22px 24px;margin-bottom:16px;display:flex;flex-wrap:wrap;gap:28px;align-items:flex-end}
-  .hero .label{font-size:12px;color:var(--dim);letter-spacing:.4px;margin-bottom:6px}
-  .big{font-size:56px;font-weight:650;font-family:var(--mono);line-height:1;letter-spacing:-2px}
-  .big em{font-size:20px;font-style:normal;color:var(--dim);margin-left:6px;letter-spacing:0}
-  .deltas{display:flex;gap:22px;margin-bottom:6px}
-  .deltas div{font-size:12px;color:var(--dim)}
-  .deltas b{display:block;font-size:17px;font-family:var(--mono);font-weight:600;margin-top:2px}
-  .meta{margin-left:auto;text-align:right;font-size:12px;color:var(--faint);font-family:var(--mono)}
-  .up{color:var(--up)} .down{color:var(--down)}
-
-  /* chart */
-  .chart{padding:18px 20px 10px;margin-bottom:16px}
-  .chart-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:10px}
-  .chart-head h2{font-size:13px;margin:0;font-weight:600;color:var(--dim)}
-  .ranges{display:flex;gap:4px}
-  .ranges button{background:none;border:1px solid var(--line);color:var(--dim);font-size:11px;
-    padding:4px 11px;border-radius:6px;cursor:pointer;font-family:inherit}
-  .ranges button.on{background:var(--panel2);color:var(--text);border-color:#3a465c}
-  svg{display:block;width:100%;height:auto;overflow:visible}
-  .gl{stroke:var(--line);stroke-width:1}
-  .ax{fill:var(--faint);font-size:10px;font-family:var(--mono)}
-
-  /* tables */
-  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-  section h2.t{font-size:13px;margin:0 0 10px;font-weight:600;color:var(--dim)}
-  table{width:100%;border-collapse:collapse;font-size:13px}
-  th{text-align:right;font-weight:500;color:var(--faint);font-size:11px;padding:0 10px 8px;border-bottom:1px solid var(--line)}
-  th:first-child{text-align:left}
-  td{text-align:right;padding:8px 10px;border-bottom:1px solid #1a212c;font-family:var(--mono)}
-  td:first-child{text-align:left;font-family:inherit}
-  tr:last-child td{border-bottom:none}
-  tr.me td{background:rgba(118,185,0,.07)}
-  tr.me td:first-child{font-weight:600;color:var(--nv)}
-  .tick{color:var(--faint);font-size:11px;margin-left:5px}
-  .spark{width:64px;height:18px;vertical-align:middle}
-  .tag{font-size:10px;padding:1px 6px;border-radius:4px;border:1px solid var(--line);color:var(--faint)}
-  .tag.q{border-color:#3a5a20;color:var(--nv)}
-  .scroll{max-height:340px;overflow-y:auto}
-
-  /* method */
-  details{margin-top:16px;padding:16px 20px;font-size:13px;color:var(--dim)}
-  summary{cursor:pointer;color:var(--text);font-size:13px;font-weight:600;list-style:none}
-  summary::-webkit-details-marker{display:none}
-  summary::before{content:"▸ ";color:var(--faint)}
-  details[open] summary::before{content:"▾ "}
-  details h3{font-size:12px;color:var(--text);margin:18px 0 6px}
-  details p,details li{font-size:12.5px;line-height:1.65}
-  details ul{padding-left:18px;margin:6px 0}
-  details code{font-family:var(--mono);font-size:11.5px;background:var(--panel2);padding:1px 5px;border-radius:4px}
-  .note{font-size:11.5px;color:var(--faint);margin-top:14px;text-align:center}
-  @media(max-width:760px){
-    .grid{grid-template-columns:1fr}
-    .big{font-size:44px}
-    .hero{gap:18px}
-    .meta{margin-left:0;text-align:left;width:100%}
-  }
+  /* critical shell - keeps the terminal legible even if the CDN is unreachable */
+  html,body{background:#000;color:#D1D5DB;margin:0;
+    font-family:ui-monospace,'Cascadia Mono','Roboto Mono',Consolas,'Courier New',monospace;
+    font-size:12px;line-height:1.35;-webkit-font-smoothing:antialiased}
+  *{box-sizing:border-box;border-radius:0!important;box-shadow:none!important}
+  table{border-collapse:collapse;width:100%}
+  a{color:#FFB000;text-decoration:none}
+  svg{display:block;width:100%;height:auto}
+  ::selection{background:#FFB000;color:#000}
+  /* thin terminal scrollbars */
+  ::-webkit-scrollbar{width:8px;height:8px}
+  ::-webkit-scrollbar-track{background:#000}
+  ::-webkit-scrollbar-thumb{background:#232323}
+  ::-webkit-scrollbar-thumb:hover{background:#3a3a3a}
+  .blink{animation:bl 1.4s step-end infinite}
+  @keyframes bl{50%{opacity:.15}}
+  .flash{animation:fl .9s ease-out 1}
+  @keyframes fl{0%{background:#FFB00033}100%{background:transparent}}
 </style>
 </head>
-<body>
-<div class="wrap">
+<body class="bg-black text-[#D1D5DB] font-mono text-[12px]">
 
-<header>
-  <h1><span>NVIDIA</span> CDS 프리미엄 트래커</h1>
-  <div class="stamp" id="stamp">불러오는 중…</div>
-</header>
-
-<div class="panel hero">
-  <div>
-    <div class="label">NVIDIA 5년 CDS (선순위 무담보)</div>
-    <div class="big" id="level">—<em>bp</em></div>
+<!-- ═══ TITLE BAR ═══ -->
+<div class="border-b border-grid bg-black">
+  <div class="flex flex-wrap items-center gap-x-4 gap-y-1 px-2 py-1">
+    <span class="text-amber-term font-bold tracking-tight">NVDA&nbsp;US</span>
+    <span class="text-[#D1D5DB]">NVIDIA CORP</span>
+    <span class="text-[#4b5563]">|</span>
+    <span class="text-[#D1D5DB]">5Y CDS · SENIOR UNSECURED · USD · XR14</span>
+    <span class="text-[#4b5563]">|</span>
+    <span class="text-[#6b7280]">SRC</span><span class="text-[#D1D5DB] -ml-3">DTCC SDR</span>
+    <span class="ml-auto flex items-center gap-3">
+      <span class="text-dn blink">■</span><span class="text-[#6b7280]">DELAYED · TRADE PRINTS</span>
+      <span class="text-[#4b5563]">|</span>
+      <span class="text-[#6b7280]">UTC</span><span id="clkU" class="text-amber-term">--:--:--</span>
+      <span class="text-[#6b7280]">KST</span><span id="clkK" class="text-amber-term">--:--:--</span>
+    </span>
   </div>
-  <div class="deltas" id="deltas"></div>
-  <div class="meta" id="hmeta"></div>
 </div>
 
-<div class="panel chart">
-  <div class="chart-head">
-    <h2 id="chart-title">체결 기반 5년 스프레드 추이</h2>
-    <div class="ranges" id="ranges"></div>
-  </div>
-  <svg id="chart" viewBox="0 0 900 340" role="img" aria-label="CDS 스프레드 추이"></svg>
+<!-- ═══ FUNCTION BAR ═══ -->
+<div class="border-b border-grid flex flex-wrap text-[11px]">
+  <a href="#px"   class="px-3 py-1 border-r border-grid hover:bg-[#111]"><span class="text-amber-term">F1</span> PRICE</a>
+  <a href="#gp"   class="px-3 py-1 border-r border-grid hover:bg-[#111]"><span class="text-amber-term">F2</span> GRAPH</a>
+  <a href="#peer" class="px-3 py-1 border-r border-grid hover:bg-[#111]"><span class="text-amber-term">F3</span> PEERS</a>
+  <a href="#blot" class="px-3 py-1 border-r border-grid hover:bg-[#111]"><span class="text-amber-term">F4</span> BLOTTER</a>
+  <a href="#news" class="px-3 py-1 border-r border-grid hover:bg-[#111]"><span class="text-amber-term">F5</span> NEWS</a>
+  <a href="#desc" class="px-3 py-1 border-r border-grid hover:bg-[#111]"><span class="text-amber-term">F6</span> DES</a>
+  <span id="asof" class="ml-auto px-3 py-1 text-[#6b7280]"></span>
 </div>
 
-<div class="grid">
-  <section class="panel" style="padding:18px 20px">
-    <h2 class="t">AI 크레딧 보드 · 5년 CDS (bp)</h2>
-    <table id="peers"><thead><tr>
-      <th>기업</th><th>스프레드</th><th>1일</th><th>1주</th><th>1개월</th><th>추이</th>
-    </tr></thead><tbody></tbody></table>
-  </section>
-
-  <section class="panel" style="padding:18px 20px">
-    <h2 class="t">NVIDIA 최근 체결 <span class="tick">DTCC 공개 보고</span></h2>
-    <div class="scroll">
-      <table id="trades"><thead><tr>
-        <th>체결시각 (UTC)</th><th>스프레드</th><th>구분</th>
-      </tr></thead><tbody></tbody></table>
+<!-- ═══ QUOTE STRIP ═══ -->
+<div id="px" class="border-b border-grid grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-12">
+  <div class="col-span-2 sm:col-span-3 lg:col-span-3 border-r border-grid px-3 py-2">
+    <div class="text-[10px] text-amber-term tracking-widest">5Y PAR SPREAD</div>
+    <div class="flex items-baseline gap-2">
+      <span id="last" class="text-[44px] leading-none font-bold tabular-nums text-[#D1D5DB]">---.-</span>
+      <span class="text-[13px] text-[#6b7280]">BP</span>
     </div>
-  </section>
+    <div id="chgline" class="text-[13px] tabular-nums mt-1">&nbsp;</div>
+  </div>
+  <div id="stats" class="col-span-2 sm:col-span-3 lg:col-span-9 grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6"></div>
 </div>
 
-<details class="panel">
-<summary>데이터 출처와 산출 방법</summary>
+<!-- ═══ MAIN ═══ -->
+<div class="grid grid-cols-1 lg:grid-cols-12">
 
-<h3>어디서 오는 숫자인가</h3>
-<p>블룸버그·Markit의 CDS 호가는 전부 유료입니다. 이 페이지는 대신 미국 SEC 규정에 따라
-<b>DTCC가 무료로 공개하는 스왑 체결 보고(Public Price Dissemination)</b>를 씁니다.
-호가가 아니라 <b>실제 체결된 거래</b>이며, 원본은
-<a href="https://pddata.dtcc.com/ppd/" target="_blank" rel="noopener">pddata.dtcc.com</a> 에서
-누구나 받을 수 있습니다.</p>
+  <!-- CHART -->
+  <div id="gp" class="lg:col-span-8 border-b lg:border-r border-grid">
+    <div class="flex items-center border-b border-grid">
+      <span class="px-2 py-1 text-amber-term text-[11px] tracking-widest border-r border-grid">GP · HISTORICAL SPREAD</span>
+      <div id="ranges" class="flex text-[11px]"></div>
+      <select id="ovl" class="ml-auto bg-black text-[#D1D5DB] text-[11px] border-l border-grid px-2 py-1 focus:outline-none">
+        <option value="">OVERLAY: NONE</option>
+      </select>
+    </div>
+    <div class="relative">
+      <svg id="chart" viewBox="0 0 1000 380" role="img" aria-label="NVDA 5Y CDS spread history"></svg>
+      <div id="rdo" class="hidden absolute top-1 left-1 bg-black border border-grid px-2 py-1 text-[11px] tabular-nums pointer-events-none"></div>
+    </div>
+  </div>
 
-<h3>업프론트 → 파 스프레드 환산</h3>
-<p>단일종목 CDS는 표준 쿠폰(IG 100bp, HY 500bp)에 업프론트 현금을 얹어 거래되므로,
-보고서에 스프레드가 아닌 현금액으로 실리는 경우가 많습니다. ISDA 표준모형과 같은 방식으로 역산합니다.</p>
-<p><code>현금 = (쿠폰 − 스프레드) × RPV01(스프레드) + 경과이자</code>
-&nbsp;— 회수율 40%, 균일 부도강도 <code>h = S/(1−R)</code>, 분기 ACT/360 IMM 쿠폰.</p>
-<p>DTCC는 업프론트를 부호 없이 공개해서 쿠폰 위·아래 두 해가 나옵니다. 같은 날 스프레드로
-직접 보고된 체결이 있으면 그것을, 없으면 직전 레벨을 기준으로 분기를 고릅니다.</p>
+  <!-- PEERS -->
+  <div id="peer" class="lg:col-span-4 border-b border-grid">
+    <div class="px-2 py-1 text-amber-term text-[11px] tracking-widest border-b border-grid flex">
+      <span>COMP · AI CREDIT COMPLEX</span><span class="ml-auto text-[#6b7280]">5Y BP</span>
+    </div>
+    <table class="tabular-nums">
+      <thead><tr class="text-[10px] text-amber-term border-b border-grid">
+        <th class="text-left  font-normal px-2 py-1">TICKER</th>
+        <th class="text-right font-normal px-2 py-1">LAST</th>
+        <th class="text-right font-normal px-2 py-1">1D</th>
+        <th class="text-right font-normal px-2 py-1">1W</th>
+        <th class="text-right font-normal px-2 py-1">1M</th>
+        <th class="text-right font-normal px-2 py-1">VS NVDA</th>
+      </tr></thead>
+      <tbody id="peers"></tbody>
+    </table>
+    <div class="px-2 py-1 text-[10px] text-[#4b5563] border-t border-grid">CLICK ROW TO OVERLAY ON GRAPH</div>
+  </div>
 
-<h3>검증</h3>
-<p>업프론트와 스프레드가 <b>둘 다</b> 실린 체결일을 홀드아웃으로 잡고, 업프론트만으로 복원한
-값과 실제 보고된 스프레드를 비교했습니다 (<code>scripts/validate.py</code>, 360 종목일):</p>
-<ul>
-  <li>전체 오차 중앙값 <b>0.8bp</b>, 90분위 6.8bp</li>
-  <li>NVIDIA 오차 중앙값 <b>0.86bp</b>, 최대 2.1bp</li>
-</ul>
-<p>외부 교차검증: 2026-07-29 보도치 83.7bp ↔ 본 페이지 81.8bp,
-2026-07-27 보도치 82bp ↔ 78.1bp. 종가 컴포짓 호가와 당일 체결 중앙값의 차이입니다.</p>
+  <!-- BLOTTER -->
+  <div id="blot" class="lg:col-span-5 border-b lg:border-r border-grid">
+    <div class="px-2 py-1 text-amber-term text-[11px] tracking-widest border-b border-grid flex">
+      <span>TRADE BLOTTER · NVDA</span><span id="blotn" class="ml-auto text-[#6b7280]"></span>
+    </div>
+    <div class="max-h-[300px] overflow-y-auto">
+      <table class="tabular-nums">
+        <thead class="sticky top-0 bg-black"><tr class="text-[10px] text-amber-term border-b border-grid">
+          <th class="text-left  font-normal px-2 py-1">EXEC TIME (UTC)</th>
+          <th class="text-right font-normal px-2 py-1">SPREAD</th>
+          <th class="text-right font-normal px-2 py-1">CHG</th>
+          <th class="text-right font-normal px-2 py-1">RPT</th>
+        </tr></thead>
+        <tbody id="trades"></tbody>
+      </table>
+    </div>
+  </div>
 
-<h3>한계</h3>
-<ul>
-  <li><b>실시간이 아닙니다.</b> DTCC 파일을 30분 주기로 받아 갱신합니다.</li>
-  <li>NVIDIA 5년 CDS는 <b>2025년 11월 20일</b>부터 체결이 잡힙니다. 그 이전 값은 없습니다.</li>
-  <li>거래가 없는 날은 점이 없습니다. NVIDIA는 최근에야 매일 체결됩니다.</li>
-  <li>공개 보고의 명목금액은 500만 달러에서 <code>5,000,000+</code>로 상한 처리되어,
-      대형 블록은 업프론트 비율이 왜곡될 수 있습니다. 일별 값으로 중앙값을 쓰고
-      기준선에서 ±50% 벗어난 체결은 제외해 걸러냅니다.</li>
-  <li>일별 값 = 그날 체결들의 <b>중앙값</b>. 딜러 종가 마크와는 몇 bp 다를 수 있습니다.</li>
-</ul>
-</details>
+  <!-- NEWS -->
+  <div id="news" class="lg:col-span-7 border-b border-grid">
+    <div class="px-2 py-1 text-amber-term text-[11px] tracking-widest border-b border-grid flex">
+      <span>NEWS &amp; TAPE</span><span class="ml-auto text-[#6b7280]">HEADLINE LOG</span>
+    </div>
+    <div class="max-h-[300px] overflow-y-auto"><table id="nwt"><tbody id="nw"></tbody></table></div>
+  </div>
 
-<p class="note">투자 자문이 아닙니다 · 원본 데이터 DTCC · 코드
-<a href="https://github.com/inandout-kr/nvda-cds" target="_blank" rel="noopener">github.com/inandout-kr/nvda-cds</a></p>
+</div>
 
+<!-- ═══ DES ═══ -->
+<div id="desc" class="border-b border-grid grid grid-cols-1 lg:grid-cols-12">
+  <div class="lg:col-span-6 lg:border-r border-grid">
+    <div class="px-2 py-1 text-amber-term text-[11px] tracking-widest border-b border-grid">DES · SOURCE &amp; MODEL</div>
+    <div class="px-2 py-2 text-[11px] text-[#9ca3af] leading-relaxed">
+      <p>BLOOMBERG·MARKIT CDS 호가는 전부 유료. 본 화면은 SEC 규정에 따라 <span class="text-[#D1D5DB]">DTCC가 무료 공개하는
+      스왑 체결 보고(PUBLIC PRICE DISSEMINATION)</span>를 사용한다. 호가가 아니라 <span class="text-[#D1D5DB]">실제 체결</span>이다.</p>
+      <p class="mt-2">단일종목 CDS는 표준쿠폰(IG 100BP / HY 500BP) + 업프론트 현금으로 거래되므로 ISDA 방식으로 역산한다.</p>
+      <p class="mt-1 text-amber-term">CASH = (CPN − S) × RPV01(S) + ACCRUED</p>
+      <p class="mt-1">R = 40%, h = S/(1−R), 분기 ACT/360 IMM 쿠폰, 균일 할인 4%.
+      DTCC는 업프론트를 부호 없이 공개하므로 쿠폰 위·아래 두 해가 나온다. 같은 날 스프레드로 직접 보고된 체결이 있으면
+      그것을, 없으면 직전 레벨을 기준선으로 분기를 선택한다.</p>
+    </div>
+  </div>
+  <div class="lg:col-span-6">
+    <div class="px-2 py-1 text-amber-term text-[11px] tracking-widest border-b border-grid">VALIDATION &amp; CAVEATS</div>
+    <table class="text-[11px] tabular-nums border-b border-grid">
+      <thead><tr class="text-[10px] text-amber-term border-b border-grid">
+        <th class="text-left font-normal px-2 py-1">HOLD-OUT SET</th>
+        <th class="text-right font-normal px-2 py-1">MEDIAN</th>
+        <th class="text-right font-normal px-2 py-1">P90</th>
+        <th class="text-right font-normal px-2 py-1">MAX</th>
+      </tr></thead>
+      <tbody>
+        <tr class="border-b border-[#111]"><td class="px-2 py-1">ALL NAMES · 360 OBS</td><td class="px-2 py-1 text-right">0.82</td><td class="px-2 py-1 text-right">6.80</td><td class="px-2 py-1 text-right">28.03</td></tr>
+        <tr><td class="px-2 py-1 text-amber-term">NVIDIA · 23 OBS</td><td class="px-2 py-1 text-right text-amber-term">0.86</td><td class="px-2 py-1 text-right text-amber-term">1.87</td><td class="px-2 py-1 text-right text-amber-term">2.08</td></tr>
+      </tbody>
+    </table>
+    <div class="px-2 py-2 text-[11px] text-[#9ca3af] leading-relaxed">
+      <p>업프론트와 스프레드가 둘 다 실린 체결일을 홀드아웃으로, 업프론트만으로 복원한 값을 실제 보고치와 대조 (BP 단위).
+      외부 대조 — 07/29 보도 83.7 ↔ 산출 81.8, 07/27 보도 82.0 ↔ 78.1.</p>
+      <p class="mt-2 text-[#6b7280]">CAVEAT — 실시간 아님(30분 주기 갱신) · NVDA 5Y는 2025-11-20부터 체결 관측 ·
+      체결 없는 날은 값 없음 · 명목금액 5,000,000+ 상한 처리로 대형 블록은 왜곡 가능(일별 중앙값 + 기준선 ±50% 필터로 방어) ·
+      일별 값은 당일 체결 중앙값이며 딜러 종가 마크와 수 BP 차이 가능.</p>
+    </div>
+  </div>
+</div>
+
+<div class="px-2 py-2 text-[10px] text-[#4b5563] flex flex-wrap gap-x-4">
+  <span>NOT INVESTMENT ADVICE</span>
+  <span>DATA © DTCC · <a href="https://pddata.dtcc.com/ppd/" target="_blank" rel="noopener">PDDATA.DTCC.COM</a></span>
+  <span>SRC <a href="https://github.com/inandout-kr/nvda-cds" target="_blank" rel="noopener">GITHUB.COM/INANDOUT-KR/NVDA-CDS</a></span>
 </div>
 
 <script>
-const RANGES = [["1M",30],["3M",91],["6M",182],["전체",0]];
-let DATA = null, range = 91;
+const RANGES = [["1M",30],["3M",91],["6M",182],["MAX",0]];
+const AMBER = "#FFB000", UP = "#00FF00", DN = "#FF0000", GRID = "#232323";
+let DATA = null, NEWS = [], range = 91, overlay = "";
 
-const bp = v => v == null ? "—" : v.toFixed(1);
-const sign = v => (v > 0 ? "+" : "") + v.toFixed(1);
-const cls = v => v == null ? "" : v > 0 ? "up" : v < 0 ? "down" : "";
+const f1 = v => v == null ? "---.-" : v.toFixed(1);
+const sgn = v => (v > 0 ? "+" : v < 0 ? "" : "") + v.toFixed(1);
+// widening (higher spread) prints green, tightening prints red - terminal up/down convention
+const col = v => v == null || v === 0 ? "#6b7280" : v > 0 ? UP : DN;
+const pad = (s, n) => String(s).padStart(n, " ");
+
+function clocks() {
+  const d = new Date();
+  document.getElementById("clkU").textContent = d.toISOString().slice(11, 19);
+  document.getElementById("clkK").textContent =
+    new Date(d.getTime() + 9 * 36e5).toISOString().slice(11, 19);
+}
+setInterval(clocks, 1000); clocks();
 
 function inRange(series, days) {
   if (!days || !series.length) return series;
-  const end = new Date(series[series.length - 1][0]);
-  const cut = new Date(end.getTime() - days * 864e5);
+  const cut = new Date(new Date(series[series.length - 1][0]).getTime() - days * 864e5);
   return series.filter(p => new Date(p[0]) >= cut);
 }
 
-function drawChart(series) {
-  const W = 900, H = 340, L = 44, R = 14, T = 16, B = 26;
-  const svg = document.getElementById("chart");
-  const pts = inRange(series, range);
-  if (pts.length < 2) { svg.innerHTML = ""; return; }
+/* ── stats strip ─────────────────────────────────────────────── */
+function stats(nv) {
+  const s = nv.series, ys = s.map(p => p[1]);
+  const hi = s.reduce((a, b) => b[1] > a[1] ? b : a);
+  const lo = s.reduce((a, b) => b[1] < a[1] ? b : a);
+  const m30 = inRange(s, 30).map(p => p[1]);
+  const diffs = [];
+  for (let i = 1; i < s.length; i++) diffs.push(Math.abs(s[i][1] - s[i - 1][1]));
+  const d30 = diffs.slice(-30);
+  const avg = d30.length ? d30.reduce((a, b) => a + b, 0) / d30.length : 0;
+  const pct = Math.round(ys.filter(v => v <= nv.last).length / ys.length * 100);
+  const md = t => t.slice(5).replace("-", "/");
+  return [
+    ["1W CHG",  sgn(nv.chg_1w), col(nv.chg_1w)],
+    ["1M CHG",  sgn(nv.chg_1m), col(nv.chg_1m)],
+    ["HI " + md(hi[0]), f1(hi[1]), "#D1D5DB"],
+    ["LO " + md(lo[0]), f1(lo[1]), "#D1D5DB"],
+    ["30D RANGE", f1(Math.min(...m30)) + " – " + f1(Math.max(...m30)), "#D1D5DB"],
+    ["AVG |Δ| 30D", avg.toFixed(2) + " BP", "#D1D5DB"],
+    ["PCTL RANK", pct + "%", pct >= 90 ? UP : "#D1D5DB"],
+    ["PRINTS", String(nv.trades), "#D1D5DB"],
+    ["OBS DAYS", String(s.length), "#D1D5DB"],
+    ["INCEPTION", s[0][0], "#D1D5DB"],
+    ["RECOVERY", "40%", "#6b7280"],
+    ["TENOR", "4.0–6.0Y", "#6b7280"],
+  ];
+}
 
-  const xs = pts.map(p => new Date(p[0]).getTime());
-  const ys = pts.map(p => p[1]);
+/* ── chart ───────────────────────────────────────────────────── */
+let CH = null;
+function drawChart() {
+  const svg = document.getElementById("chart");
+  const W = 1000, H = 380, L = 6, R = 52, T = 14, B = 22;
+  const base = inRange(DATA.entities.NVIDIA.series, range);
+  if (base.length < 2) { svg.innerHTML = ""; return; }
+  const ov = overlay ? inRange(DATA.entities[overlay].series, range) : [];
+
+  const xs = base.map(p => +new Date(p[0]));
   const x0 = Math.min(...xs), x1 = Math.max(...xs);
-  let lo = Math.min(...ys), hi = Math.max(...ys);
-  const pad = Math.max((hi - lo) * 0.18, 2);
-  lo = Math.max(0, lo - pad); hi = hi + pad;
+  let all = base.map(p => p[1]);
+  let lo = Math.min(...all), hi = Math.max(...all);
+  const p = Math.max((hi - lo) * .15, 1.5); lo -= p; hi += p;
+
+  // overlay uses its own right-hand scale so shapes stay comparable
+  let olo = 0, ohi = 1;
+  if (ov.length > 1) {
+    const o = ov.map(q => q[1]); olo = Math.min(...o); ohi = Math.max(...o);
+    const q2 = Math.max((ohi - olo) * .15, 1.5); olo -= q2; ohi += q2;
+  }
 
   const X = t => L + (t - x0) / (x1 - x0 || 1) * (W - L - R);
   const Y = v => T + (1 - (v - lo) / (hi - lo || 1)) * (H - T - B);
+  const YO = v => T + (1 - (v - olo) / (ohi - olo || 1)) * (H - T - B);
+  CH = { X, Y, base, x0, x1, L, R, W, H, T, B };
 
-  // y grid: 4-6 round steps
-  const raw = (hi - lo) / 5;
-  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
-  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw) || mag * 10;
-  let out = "";
+  let g = "";
+  const step = (() => {
+    const raw = (hi - lo) / 6, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    return [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw) || mag * 10;
+  })();
   for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
-    out += `<line class="gl" x1="${L}" x2="${W - R}" y1="${Y(v).toFixed(1)}" y2="${Y(v).toFixed(1)}"/>`
-         + `<text class="ax" x="${L - 8}" y="${(Y(v) + 3.5).toFixed(1)}" text-anchor="end">${Math.round(v)}</text>`;
+    const y = Y(v).toFixed(1);
+    g += `<line x1="${L}" x2="${W - R}" y1="${y}" y2="${y}" stroke="${GRID}" stroke-width="1" stroke-dasharray="2 3"/>`
+      + `<text x="${W - R + 5}" y="${(+y + 3.5).toFixed(1)}" fill="#6b7280" font-size="10" font-family="monospace">${v.toFixed(0)}</text>`;
   }
-  // x labels: month boundaries
-  let lastMon = "";
-  pts.forEach(p => {
-    const d = new Date(p[0]), key = d.getUTCFullYear() + "-" + d.getUTCMonth();
-    if (key !== lastMon) {
-      lastMon = key;
-      out += `<text class="ax" x="${X(d.getTime()).toFixed(1)}" y="${H - 8}" text-anchor="middle">`
-           + `${d.getUTCMonth() + 1}월</text>`;
+  let lastM = "";
+  base.forEach(pt => {
+    const d = new Date(pt[0]), k = d.getUTCFullYear() + "" + d.getUTCMonth();
+    if (k !== lastM) {
+      lastM = k;
+      const x = X(+d);
+      g += `<line x1="${x.toFixed(1)}" x2="${x.toFixed(1)}" y1="${T}" y2="${H - B}" stroke="${GRID}" stroke-width="1"/>`
+        + `<text x="${(x + 3).toFixed(1)}" y="${H - 8}" fill="#6b7280" font-size="10" font-family="monospace">`
+        + `${String(d.getUTCMonth() + 1).padStart(2, "0")}/${String(d.getUTCFullYear()).slice(2)}</text>`;
     }
   });
 
-  const line = pts.map((p, i) => (i ? "L" : "M") + X(xs[i]).toFixed(1) + " " + Y(p[1]).toFixed(1)).join(" ");
-  const area = line + ` L${X(x1).toFixed(1)} ${Y(lo).toFixed(1)} L${X(x0).toFixed(1)} ${Y(lo).toFixed(1)} Z`;
+  if (ov.length > 1) {
+    const op = ov.map((q, i) => (i ? "L" : "M") + X(+new Date(q[0])).toFixed(1) + " " + YO(q[1]).toFixed(1)).join(" ");
+    g += `<path d="${op}" fill="none" stroke="#5a4a1a" stroke-width="1.2"/>`
+      + `<text x="${L + 4}" y="${T + 24}" fill="#5a4a1a" font-size="10" font-family="monospace">`
+      + `${DATA.entities[overlay].ticker} ${olo.toFixed(0)}–${ohi.toFixed(0)}BP (RHS SCALE)</text>`;
+  }
 
-  out += `<defs><linearGradient id="g" x1="0" x2="0" y1="0" y2="1">
-      <stop offset="0" stop-color="#76b900" stop-opacity=".28"/>
-      <stop offset="1" stop-color="#76b900" stop-opacity="0"/></linearGradient></defs>`
-    + `<path d="${area}" fill="url(#g)"/>`
-    + `<path d="${line}" fill="none" stroke="#76b900" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
-
-  pts.forEach((p, i) => {
-    out += `<circle cx="${X(xs[i]).toFixed(1)}" cy="${Y(p[1]).toFixed(1)}" r="${i === pts.length - 1 ? 4 : 2}"`
-         + ` fill="#76b900"><title>${p[0]} · ${p[1].toFixed(1)}bp · 체결 ${p[2]}건</title></circle>`;
+  const line = base.map((pt, i) => (i ? "L" : "M") + X(xs[i]).toFixed(1) + " " + Y(pt[1]).toFixed(1)).join(" ");
+  g += `<path d="${line}" fill="none" stroke="${AMBER}" stroke-width="1.4"/>`;
+  base.forEach((pt, i) => {
+    g += `<rect x="${(X(xs[i]) - 1.5).toFixed(1)}" y="${(Y(pt[1]) - 1.5).toFixed(1)}" width="3" height="3" fill="${AMBER}"/>`;
   });
-  svg.innerHTML = out;
+
+  const lv = base[base.length - 1][1], ly = Y(lv);
+  g += `<line x1="${L}" x2="${W - R}" y1="${ly.toFixed(1)}" y2="${ly.toFixed(1)}" stroke="${AMBER}" stroke-width="1" stroke-dasharray="1 4" opacity=".6"/>`
+    + `<rect x="${W - R}" y="${(ly - 7).toFixed(1)}" width="${R}" height="14" fill="${AMBER}"/>`
+    + `<text x="${W - R + 4}" y="${(ly + 3.5).toFixed(1)}" fill="#000" font-size="10" font-weight="bold" font-family="monospace">${lv.toFixed(1)}</text>`
+    + `<text x="${L + 4}" y="${T + 10}" fill="${AMBER}" font-size="10" font-family="monospace">NVDA 5Y CDS · BP · ${base.length} OBS</text>`
+    + `<line id="cx" x1="0" x2="0" y1="${T}" y2="${H - B}" stroke="#666" stroke-width="1" visibility="hidden"/>`;
+  svg.innerHTML = g;
 }
 
-function sparkline(series) {
-  const pts = inRange(series, 91);
-  if (pts.length < 2) return "";
-  const ys = pts.map(p => p[1]);
-  const lo = Math.min(...ys), hi = Math.max(...ys);
-  const d = pts.map((p, i) =>
-    (i ? "L" : "M") + (i / (pts.length - 1) * 62 + 1).toFixed(1) + " " +
-    (16 - (p[1] - lo) / (hi - lo || 1) * 14).toFixed(1)).join(" ");
-  const rising = ys[ys.length - 1] >= ys[0];
-  return `<svg class="spark" viewBox="0 0 64 18"><path d="${d}" fill="none" stroke="${
-    rising ? "#ff5c5c" : "#3ddc84"}" stroke-width="1.4"/></svg>`;
+function crosshair(ev) {
+  if (!CH) return;
+  const svg = document.getElementById("chart"), r = svg.getBoundingClientRect();
+  const vx = (ev.clientX - r.left) / r.width * CH.W;
+  let best = 0, bd = 1e9;
+  CH.base.forEach((p, i) => {
+    const d = Math.abs(CH.X(+new Date(p[0])) - vx);
+    if (d < bd) { bd = d; best = i; }
+  });
+  const p = CH.base[best], px = CH.X(+new Date(p[0]));
+  const ln = document.getElementById("cx");
+  if (ln) { ln.setAttribute("x1", px); ln.setAttribute("x2", px); ln.setAttribute("visibility", "visible"); }
+  const prev = best ? CH.base[best - 1][1] : null;
+  const ch = prev == null ? null : p[1] - prev;
+  const box = document.getElementById("rdo");
+  box.className = "absolute top-1 left-1 bg-black border border-grid px-2 py-1 text-[11px] tabular-nums pointer-events-none";
+  box.innerHTML = `<span class="text-[#FFB000]">${p[0]}</span>&nbsp; `
+    + `SPRD <b class="text-[#D1D5DB]">${p[1].toFixed(1)}</b> BP&nbsp; `
+    + `CHG <b style="color:${col(ch)}">${ch == null ? "--" : sgn(ch)}</b>&nbsp; `
+    + `<span class="text-[#6b7280]">PRINTS ${p[2]}</span>`;
+}
+function crossOff() {
+  const ln = document.getElementById("cx"); if (ln) ln.setAttribute("visibility", "hidden");
+  document.getElementById("rdo").className = "hidden";
 }
 
+/* ── render ──────────────────────────────────────────────────── */
 function render() {
   const nv = DATA.entities.NVIDIA;
-  document.getElementById("level").innerHTML = bp(nv.last) + "<em>bp</em>";
-  document.getElementById("deltas").innerHTML = [["1일", nv.chg_1d], ["1주", nv.chg_1w], ["1개월", nv.chg_1m]]
-    .map(([k, v]) => `<div>${k}<b class="${cls(v)}">${v == null ? "—" : sign(v)}</b></div>`).join("");
-  document.getElementById("hmeta").innerHTML =
-    `최종 체결일 ${nv.last_date}<br>당일 체결 ${nv.trades}건 · 이력 ${nv.series.length}일`;
-  document.getElementById("stamp").textContent = "갱신 " + DATA.updated.replace("T", " ").replace("Z", " UTC");
+  document.getElementById("last").textContent = f1(nv.last);
+  const pctc = nv.chg_1d == null ? null : nv.chg_1d / (nv.last - nv.chg_1d) * 100;
+  document.getElementById("chgline").innerHTML =
+    `<span style="color:${col(nv.chg_1d)}">${nv.chg_1d == null ? "--" : sgn(nv.chg_1d) + " BP"}`
+    + `${pctc == null ? "" : "  (" + sgn(pctc) + "%)"}</span>`
+    + `<span class="text-[#4b5563]"> · 1D</span>`;
+  document.getElementById("asof").textContent =
+    "AS OF " + nv.last_date + "  ·  BUILD " + DATA.updated.replace("T", " ").replace("Z", "Z");
 
-  const rows = Object.entries(DATA.entities)
-    .filter(([, e]) => e.last != null)
+  document.getElementById("stats").innerHTML = stats(nv).map(([k, v, c]) => `
+    <div class="border-l border-b border-grid px-2 py-1">
+      <div class="text-[10px] text-amber-term truncate">${k}</div>
+      <div class="text-[13px] tabular-nums truncate" style="color:${c}">${v}</div>
+    </div>`).join("");
+
+  const rows = Object.entries(DATA.entities).filter(([, e]) => e.last != null)
     .sort((a, b) => b[1].last - a[1].last);
-  document.querySelector("#peers tbody").innerHTML = rows.map(([k, e]) => `
-    <tr class="${k === "NVIDIA" ? "me" : ""}">
-      <td>${e.name}<span class="tick">${e.ticker}</span></td>
-      <td>${bp(e.last)}</td>
-      <td class="${cls(e.chg_1d)}">${e.chg_1d == null ? "—" : sign(e.chg_1d)}</td>
-      <td class="${cls(e.chg_1w)}">${e.chg_1w == null ? "—" : sign(e.chg_1w)}</td>
-      <td class="${cls(e.chg_1m)}">${e.chg_1m == null ? "—" : sign(e.chg_1m)}</td>
-      <td>${sparkline(e.series)}</td>
+  document.getElementById("peers").innerHTML = rows.map(([k, e]) => `
+    <tr data-k="${k}" class="border-b border-[#111] cursor-pointer hover:bg-[#111] ${k === "NVIDIA" ? "bg-[#1a1200]" : ""}">
+      <td class="px-2 py-[3px] ${k === "NVIDIA" ? "text-amber-term font-bold" : "text-[#D1D5DB]"}">${e.ticker}
+        <span class="text-[#4b5563] text-[10px] ml-1">${e.name.toUpperCase()}</span></td>
+      <td class="px-2 py-[3px] text-right ${k === "NVIDIA" ? "text-amber-term font-bold" : ""}">${f1(e.last)}</td>
+      <td class="px-2 py-[3px] text-right" style="color:${col(e.chg_1d)}">${e.chg_1d == null ? "--" : sgn(e.chg_1d)}</td>
+      <td class="px-2 py-[3px] text-right" style="color:${col(e.chg_1w)}">${e.chg_1w == null ? "--" : sgn(e.chg_1w)}</td>
+      <td class="px-2 py-[3px] text-right" style="color:${col(e.chg_1m)}">${e.chg_1m == null ? "--" : sgn(e.chg_1m)}</td>
+      <td class="px-2 py-[3px] text-right text-[#6b7280]">${k === "NVIDIA" ? "—" : sgn(e.last - nv.last)}</td>
+    </tr>`).join("");
+  document.querySelectorAll("#peers tr").forEach(tr => tr.onclick = () => {
+    const k = tr.dataset.k;
+    overlay = (k === "NVIDIA" || k === overlay) ? "" : k;
+    document.getElementById("ovl").value = overlay;
+    drawChart();
+  });
+
+  document.getElementById("ovl").innerHTML = '<option value="">OVERLAY: NONE</option>' +
+    rows.filter(([k]) => k !== "NVIDIA")
+        .map(([k, e]) => `<option value="${k}"${k === overlay ? " selected" : ""}>OVERLAY: ${e.ticker}</option>`).join("");
+
+  const tr = DATA.nvidia_trades;
+  document.getElementById("blotn").textContent = "LAST " + tr.length + " PRINTS";
+  document.getElementById("trades").innerHTML = tr.map((t, i) => {
+    const ch = i < tr.length - 1 ? t.spread - tr[i + 1].spread : null;
+    return `<tr class="border-b border-[#111]">
+      <td class="px-2 py-[3px] text-[#9ca3af]">${t.ts.replace("T", "  ").replace("Z", "")}</td>
+      <td class="px-2 py-[3px] text-right text-[#D1D5DB]">${t.spread.toFixed(1)}</td>
+      <td class="px-2 py-[3px] text-right" style="color:${col(ch)}">${ch == null ? "--" : sgn(ch)}</td>
+      <td class="px-2 py-[3px] text-right text-[10px] ${t.quoted ? "text-amber-term" : "text-[#4b5563]"}">${t.quoted ? "SPRD" : "UPFR"}</td>
+    </tr>`;
+  }).join("");
+
+  // headline log + auto-generated tape lines for the biggest daily moves
+  const tape = [];
+  const s = nv.series;
+  for (let i = 1; i < s.length; i++) {
+    const d = s[i][1] - s[i - 1][1];
+    if (Math.abs(d) >= 6) tape.push({ date: s[i][0], src: "CALC",
+      text: `NVDA 5Y CDS ${d > 0 ? "확대" : "축소"} ${sgn(d)}BP → ${s[i][1].toFixed(1)}BP (체결 ${s[i][2]}건)`, d });
+  }
+  const feed = [...NEWS, ...tape].sort((a, b) => a.date < b.date ? 1 : -1).slice(0, 40);
+  document.getElementById("nw").innerHTML = feed.map(n => `
+    <tr class="border-b border-[#111] hover:bg-[#111] align-top">
+      <td class="px-2 py-[3px] text-amber-term whitespace-nowrap">${n.date.replace(/-/g, "/").slice(5)}</td>
+      <td class="px-2 py-[3px] text-[10px] text-[#4b5563] whitespace-nowrap">${n.src}</td>
+      <td class="px-2 py-[3px] ${n.src === "CALC" ? "" : "text-[#D1D5DB]"}" ${n.d != null ? `style="color:${col(n.d)}"` : ""}>
+        ${n.url ? `<a href="${n.url}" target="_blank" rel="noopener" class="hover:underline">${n.text}</a>` : n.text}
+      </td>
     </tr>`).join("");
 
-  document.querySelector("#trades tbody").innerHTML = DATA.nvidia_trades.map(t => `
-    <tr><td>${t.ts.replace("T", " ").replace("Z", "")}</td><td>${t.spread.toFixed(1)}</td>
-    <td><span class="tag ${t.quoted ? "q" : ""}">${t.quoted ? "스프레드 보고" : "업프론트 환산"}</span></td></tr>`).join("");
-
-  drawChart(nv.series);
+  drawChart();
 }
 
-document.getElementById("ranges").innerHTML = RANGES
-  .map(([l, d]) => `<button data-d="${d}"${d === range ? ' class="on"' : ""}>${l}</button>`).join("");
-document.getElementById("ranges").addEventListener("click", e => {
+/* ── wiring ──────────────────────────────────────────────────── */
+document.getElementById("ranges").innerHTML = RANGES.map(([l, d]) =>
+  `<button data-d="${d}" class="px-3 py-1 border-r border-grid hover:bg-[#111] ${d === range ? "bg-[#1a1200] text-amber-term" : "text-[#6b7280]"}">${l}</button>`).join("");
+document.getElementById("ranges").onclick = e => {
   if (e.target.tagName !== "BUTTON") return;
   range = +e.target.dataset.d;
-  document.querySelectorAll("#ranges button").forEach(b => b.classList.toggle("on", b === e.target));
-  drawChart(DATA.entities.NVIDIA.series);
-});
+  [...document.querySelectorAll("#ranges button")].forEach(b => {
+    const on = b === e.target;
+    b.className = "px-3 py-1 border-r border-grid hover:bg-[#111] " + (on ? "bg-[#1a1200] text-amber-term" : "text-[#6b7280]");
+  });
+  drawChart();
+};
+document.getElementById("ovl").onchange = e => { overlay = e.target.value; drawChart(); };
+const cv = document.getElementById("chart");
+cv.addEventListener("mousemove", crosshair);
+cv.addEventListener("mouseleave", crossOff);
+window.addEventListener("resize", () => DATA && drawChart());
 
 async function load() {
   try {
-    const r = await fetch("data/cds.json?t=" + Date.now());
-    DATA = await r.json();
+    const [d, n] = await Promise.all([
+      fetch("data/cds.json?t=" + Date.now()).then(r => r.json()),
+      fetch("data/news.json").then(r => r.ok ? r.json() : { items: [] }).catch(() => ({ items: [] })),
+    ]);
+    DATA = d; NEWS = n.items || [];
     render();
+    document.getElementById("asof").classList.add("flash");
+    setTimeout(() => document.getElementById("asof").classList.remove("flash"), 1000);
   } catch (err) {
-    document.getElementById("stamp").textContent = "데이터를 불러오지 못했습니다";
+    document.getElementById("asof").textContent = "*** DATA FEED ERROR ***";
+    document.getElementById("asof").style.color = DN;
   }
 }
 load();
 setInterval(load, 300000);
-window.addEventListener("resize", () => DATA && drawChart(DATA.entities.NVIDIA.series));
 </script>
 </body>
 </html>
