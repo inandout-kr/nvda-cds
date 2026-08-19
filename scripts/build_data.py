@@ -151,7 +151,10 @@ def collect(start: date, end: date) -> dict[str, dict[date, list[dict]]]:
             continue
         for row in rows:
             t = parse_trade(row)
-            if t:
+            # a day's file also carries trades executed earlier (late reports and
+            # corrections). Taking them would rewrite a past day from a partial
+            # sample, so an incremental run stays inside its own window.
+            if t and start <= t["date"] <= end:
                 by_entity[t["key"]].setdefault(t["date"], []).append(t)
     return by_entity
 
