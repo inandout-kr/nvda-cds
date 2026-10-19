@@ -18,7 +18,7 @@ def validate(payload: dict) -> list[str]:
                             start=date.fromisoformat(payload["coverage"]["start"]),
                             end=date.fromisoformat(payload["coverage"]["end"]), now=payload["updated"])
     errors = []
-    for field in ("entities", "missing_entities", "methodology_details", "coverage"):
+    for field in ("timestamp_policy", "entities", "missing_entities", "methodology_details", "coverage"):
         if payload.get(field) != rebuilt[field]:
             errors.append(f"{field} differs from a fresh direct-only rebuild")
     for key, entity in payload["entities"].items():

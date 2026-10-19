@@ -25,6 +25,7 @@ STATE_OUT = os.path.join(ROOT, "docs", "data", "report-state.json")
 HISTORY_START = date(2025, 10, 1)
 SCHEMA_VERSION = 2
 DATA_POLICY = "direct-reported-only"
+TIMESTAMP_POLICY = "event-time-is-not-publication-time"
 WATCHLIST = [
     ("NVIDIA", "NVIDIA", "NVDA", {"NVIDIACORP", "NVIDIACORPORATION"}),
     ("ORACLE", "Oracle", "ORCL", {"ORACLECORPORATION", "ORACLECORP"}),
@@ -216,7 +217,7 @@ def inspect_record(record: dict, lifecycle: list[str] | None = None,
         scope_reasons.append("outside_4_6_year_bucket")
     reasons.extend(scope_reasons)
     if not event_time:
-        reasons.append("invalid_report_timestamp")
+        reasons.append("invalid_source_event_timestamp")
     if raw.get("Action type") != "NEWT" or raw.get("Event type") != "TRAD":
         reasons.append("not_new_trade_report")
     if raw.get("Package indicator", "").upper() not in {"", "FALSE", "N"}:
@@ -256,15 +257,16 @@ def inspect_record(record: dict, lifecycle: list[str] | None = None,
     if len(set(values)) > 1:
         reasons.append("ambiguous_multi_leg_spread")
     reasons = sorted(set(reasons))
-    delay = (event_time - execution).total_seconds() if event_time and execution else None
     return {
         "entity": key, "report_id": raw.get("Dissemination Identifier") or None,
         "original_report_id": raw.get("Original Dissemination Identifier") or None,
         "action": raw.get("Action type"), "event": raw.get("Event type"),
         "entity_name": raw.get("Underlying Asset Name") or None,
         "entity_alias": norm(raw.get("Underlying Asset Name")), "currency": currency,
-        "execution_timestamp": iso(execution), "report_timestamp": iso(event_time),
-        "report_timestamp_field": "Event timestamp", "report_delay_seconds": delay,
+        "execution_timestamp": iso(execution), "source_event_timestamp": iso(event_time),
+        "source_event_timestamp_field": "Event timestamp",
+        "dissemination_timestamp": None, "publication_delay_seconds": None,
+        "publication_delay_status": "unavailable_no_dissemination_timestamp",
         "maturity_date": maturity.isoformat() if maturity else None,
         "remaining_years": round(years, 6) if years is not None else None,
         "upi_fisn": raw.get("UPI FISN") or None, "upi": raw.get("Unique Product Identifier") or None,
@@ -331,7 +333,7 @@ def build_payload(records: list[dict], files: list[dict], *, start: date,
     entities = {}
     for key, name, ticker, _ in WATCHLIST:
         all_reports = sorted([r for r in reports if r["entity"] == key],
-                             key=lambda r: (r["report_timestamp"] or "", r["report_id"] or ""), reverse=True)
+                             key=lambda r: (r["source_event_timestamp"] or "", r["report_id"] or ""), reverse=True)
         qualified = [r for r in all_reports if r["scope_eligible"]]
         raw_spread_reports = [r for r in qualified if r["action"] == "NEWT" and r["event"] == "TRAD"
                               and r["lifecycle_status"] == "unamended_new_report"
@@ -352,10 +354,10 @@ def build_payload(records: list[dict], files: list[dict], *, start: date,
             "trades": series[-1][2] if series else 0,
             "chg_1d": change(series, 1), "chg_1w": change(series, 7), "chg_1m": change(series, 30),
             "last_trade_timestamp": last_trade["execution_timestamp"] if last_trade else None,
-            "last_report_timestamp": max((r["report_timestamp"] for r in latest_group), default=None),
-            "last_report_delay_seconds": last_trade["report_delay_seconds"] if last_trade else None,
+            "last_source_event_timestamp": max((r["source_event_timestamp"] for r in latest_group), default=None),
+            "last_dissemination_timestamp": None, "last_publication_delay_seconds": None,
             "latest_report": qualified[0] if qualified else None,
-            "latest_spread_report": max(raw_spread_reports, key=lambda r: (r["execution_timestamp"] or "", r["report_timestamp"] or ""), default=None),
+            "latest_spread_report": max(raw_spread_reports, key=lambda r: (r["execution_timestamp"] or "", r["source_event_timestamp"] or ""), default=None),
             "recent_reports": qualified[:40],
             "recent_excluded_scope_reports": [r for r in all_reports if not r["scope_eligible"]][:10],
             "quality_counts": dict(sorted(quality.items())), "eligible_report_count": len(eligible),
@@ -366,6 +368,7 @@ def build_payload(records: list[dict], files: list[dict], *, start: date,
     failures = [f for f in files if f["status"] in {"error", "stale_cache", "offline_missing"}]
     return {
         "schema_version": SCHEMA_VERSION, "data_policy": DATA_POLICY,
+        "timestamp_policy": TIMESTAMP_POLICY,
         "updated": now or utc_now(), "entities": entities,
         "missing_entities": [key for key, entity in entities.items() if entity["last"] is None],
         "methodology_details": {
@@ -374,9 +377,12 @@ def build_payload(records: list[dict], files: list[dict], *, start: date,
             "seniority": FISN, "currency": "USD",
             "notation_verification": copy.deepcopy(NOTATION_VERIFICATION),
             "lifecycle_policy": "Identical repeated reports deduplicated; conflicting IDs and entire amended/error chains excluded conservatively.",
+            "timestamps": "Event timestamp is the source event time, not a dissemination/publication time. The selected public fields contain no certified dissemination timestamp; publication latency is unavailable and is never derived from event minus execution time.",
+            "record_order": "Latest/recent report records are ordered by source_event_timestamp, not public dissemination order. latest_spread_report is selected by execution_timestamp, with source event time only as a tie-breaker.",
+            "source_file_date": "source_files.date identifies the UTC day of the cumulative public dissemination file; it does not establish a precise dissemination timestamp or publication latency.",
             "limitations": ["Public reports are not a dealer close or authenticated par-spread quotation.",
                             "Documentation clause is not established by selected public fields; no cross-documentation adjustment is made.",
-                            "Event timestamp is preserved as a source event field; its difference from execution is not certified publication latency.",
+                            "No certified dissemination timestamp is available in the selected source fields; publication delay remains null regardless of event and execution timestamps.",
                             "Online runs refresh today and the prior two UTC source dates; older cached snapshots can miss later source republications until refreshed explicitly.",
                             "Build timestamp does not imply a fresh source file or recent trade."]},
         "coverage": {"start": start.isoformat(), "end": end.isoformat(),

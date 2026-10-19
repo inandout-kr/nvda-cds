@@ -10,9 +10,9 @@ const source = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m=>m[1]).
 const keys=["NVIDIA","ORACLE","COREWEAVE","BROADCOM","AMD","MICROSOFT","META","ALPHABET","AMAZON","SOFTBANK","DELL","INTEL"];
 function payload() {
   return {
-    schema_version:2,data_policy:"direct-reported-only",updated:"2026-10-19T12:00:00Z",
+    schema_version:2,data_policy:"direct-reported-only",timestamp_policy:"event-time-is-not-publication-time",updated:"2026-10-19T12:00:00Z",
     coverage:{start:"2025-10-01",end:"2026-10-19",last_successful_file_date:"2026-10-16",files:[],failed_files:[],missing_files:[]},
-    entities:Object.fromEntries(keys.map(k=>[k,{series:[],last:null,last_date:null,trades:0,last_trade_timestamp:null,last_report_timestamp:null,last_report_delay_seconds:null,recent_reports:[],latest_report:null,quality_counts:{}}])),
+    entities:Object.fromEntries(keys.map(k=>[k,{series:[],last:null,last_date:null,trades:0,last_trade_timestamp:null,last_source_event_timestamp:null,last_dissemination_timestamp:null,last_publication_delay_seconds:null,recent_reports:[],latest_report:null,quality_counts:{}}])),
     methodology_details:{label:"Verified direct reports only"}
   };
 }
@@ -41,12 +41,18 @@ async function main() {
   const legacy=await boot({updated:"2026-10-19T12:00:00Z",entities:{NVIDIA:{last:500,series:[["2026-10-16",500,1]]}}});
   assert.match(legacy.e("feed-status").textContent,/DATA ERROR.*스키마 v2/);
   assert.equal(legacy.e("last").textContent,"—","Legacy estimated prices must never be displayed");
+  const oldV2=payload();delete oldV2.timestamp_policy;
+  oldV2.entities.NVIDIA.last_report_timestamp="2026-10-16T14:20:00Z";
+  oldV2.entities.NVIDIA.last_report_delay_seconds=0;
+  const oldTimes=await boot(oldV2);
+  assert.match(oldTimes.e("feed-status").textContent,/DATA ERROR.*타임스탬프 정책 오류/);
+  assert.equal(oldTimes.e("last").textContent,"—","Old v2 event-as-publication timestamps must be refused");
   const httpError=await boot(payload(),{status:404});
   assert.match(httpError.e("feed-status").textContent,/HTTP 404/);
   assert.equal(httpError.e("peers").innerHTML,"");
 
   const p=payload(), nv=p.entities.NVIDIA;
-  Object.assign(nv,{series:[["2026-10-01",95,2],["2026-10-16",101,1]],last:101,last_date:"2026-10-16",trades:1,last_trade_timestamp:"2026-10-16T14:20:00Z",last_report_timestamp:"2026-10-16T15:20:00Z",last_report_delay_seconds:3600});
+  Object.assign(nv,{series:[["2026-10-01",95,2],["2026-10-16",101,1]],last:101,last_date:"2026-10-16",trades:1,last_trade_timestamp:"2026-10-16T14:20:00Z",last_source_event_timestamp:"2026-10-16T15:20:00Z"});
   p.entities.ORACLE.series=[["2026-10-15",110,1]];Object.assign(p.entities.ORACLE,{last:110,last_date:"2026-10-15",trades:1,last_trade_timestamp:"2026-10-15T12:00:00Z"});
   const observed=await boot(p);
   assert.equal(observed.e("last").textContent,"101.0");
@@ -55,12 +61,14 @@ async function main() {
   assert.doesNotMatch(observed.e("chart").innerHTML,/<path |<polyline /,"Missing dates must have no interpolating price line");
   assert.doesNotMatch(observed.e("peers").innerHTML,/1D|VS NVDA|\+9\.0/);
   assert.doesNotMatch(observed.all(),/NaN|Infinity/);
+  assert.match(observed.e("stats").innerHTML,/원천 이벤트 시각 UTC.*2026-10-16 15:20:00Z \(Event timestamp\)/);
+  assert.match(observed.e("stats").innerHTML,/공개 시각 \/ 공개 지연.*미확인 \/ 미확인/);
   observed.run('showError(new Error("fixture refresh failed"))');
   assert.equal(observed.e("last").textContent,"—","A failed refresh must remove prior numeric display");
   assert.equal(observed.e("chart").innerHTML,"");
 
   const raw=payload();
-  const report={report_id:"<img src=x onerror=alert(1)>",entity_name:"NVIDIA CORP",execution_timestamp:"2026-10-16T14:20:00Z",report_timestamp:"2026-10-16T15:20:00Z",maturity_date:"2031-09-20",remaining_years:4.93,currency:"USD",spread_bp:null,quality_reasons:["unverified_spread_notation"],spread_legs:[{leg:1,raw:"0.0095",notation:"3",currency:"USD"}],fixed_rates:[{leg:1,raw:"0.01"}],upfront:{amount:"10000",type:"UFRO"},source_files:[{date:"2026-10-16",url:"javascript:alert(1)"}]};
+  const report={report_id:"<img src=x onerror=alert(1)>",entity_name:"NVIDIA CORP",execution_timestamp:"2026-10-16T14:20:00Z",source_event_timestamp:"2026-10-16T15:20:00Z",source_event_timestamp_field:"Event timestamp",dissemination_timestamp:null,publication_delay_seconds:null,publication_delay_status:"unavailable_no_dissemination_timestamp",maturity_date:"2031-09-20",remaining_years:4.93,currency:"USD",spread_bp:null,quality_reasons:["unverified_spread_notation"],spread_legs:[{leg:1,raw:"0.0095",notation:"3",currency:"USD"}],fixed_rates:[{leg:1,raw:"0.01"}],upfront:{amount:"10000",type:"UFRO"},source_files:[{date:"2026-10-16",url:"javascript:alert(1)"}]};
   raw.entities.NVIDIA.recent_reports=[report];raw.entities.NVIDIA.latest_report=report;
   raw.entities.NVIDIA.quality_counts={unverified_spread_notation:1};
   raw.entities.NVIDIA.scope_exclusion_counts={outside_4_6_year_bucket:22,not_usd:3};
@@ -79,6 +87,21 @@ async function main() {
   assert.match(unverified.e("records").innerHTML,/&lt;img/);
   assert.doesNotMatch(unverified.e("coverage-details").innerHTML,/<script>/);
   assert.match(unverified.e("feed-status").textContent,/수집 범위 불완전/);
+  for(const eventTime of ["2026-10-16T14:20:00Z","2026-10-16T15:20:00Z"]){
+    const times=payload();
+    times.entities.NVIDIA.recent_reports=[{...report,report_id:"timestamp-policy-fixture",source_event_timestamp:eventTime}];
+    times.entities.NVIDIA.latest_report=times.entities.NVIDIA.recent_reports[0];
+    const rendered=await boot(times);
+    assert.match(rendered.e("raw-summary").innerHTML,/원천 이벤트 시각 UTC \(Event timestamp\)/);
+    assert.ok(rendered.e("raw-summary").innerHTML.includes(eventTime.replace("T"," ")));
+    assert.match(rendered.e("raw-summary").innerHTML,/공개 시각 미확인 · 공개 지연 미확인/);
+    assert.match(rendered.e("records").innerHTML,/공개 시각 미확인 · 공개 지연 미확인/);
+    assert.match(rendered.e("stats").innerHTML,/공개 시각 \/ 공개 지연.*미확인 \/ 미확인/);
+    assert.doesNotMatch(rendered.all(),/\bRPT\b|보고 후|보고 UTC|보고 시각|지연\s*0초|지연\s*1\.0시간/,
+      "Event=execution or event=execution+1h must not be displayed as public/report time or delay");
+  }
+  const forgedTiming=payload();forgedTiming.entities.NVIDIA.recent_reports=[{...report,publication_delay_seconds:0}];
+  assert.match((await boot(forgedTiming)).e("feed-status").textContent,/DATA ERROR/);
   const historical=payload();
   const latestCoupon={...report,report_id:"recent-coupon-only",execution_timestamp:"2026-10-16T15:21:52Z",spread_legs:[{leg:1,raw:null,notation:null}],quality_reasons:["no_reported_spread"]};
   const oldSpread={...report,report_id:"old-spread-report",execution_timestamp:"2026-04-14T13:08:41Z",spread_legs:[{leg:1,raw:"0.000125",notation:"3"}]};
@@ -100,9 +123,13 @@ async function main() {
     const real=JSON.parse(fs.readFileSync(process.argv[2],"utf8"));
     const actual=await boot(real);
     assert.doesNotMatch(actual.e("feed-status").textContent,/DATA ERROR/,actual.e("feed-status").textContent);
-    for(const key of keys){actual.run(`selected=${JSON.stringify(key)};render()`);assert.doesNotMatch(actual.all(),/NaN|Infinity/);}
+    for(const key of keys){
+      actual.run(`selected=${JSON.stringify(key)};render()`);
+      assert.doesNotMatch(actual.all(),/NaN|Infinity|\bRPT\b|보고 후|보고 UTC|지연\s*0초/);
+      assert.match(actual.e("stats").innerHTML,/공개 시각 \/ 공개 지연.*미확인 \/ 미확인/);
+    }
     console.log("PASS: current v2 payload renders all 12 watchlist members");
   }
-  console.log("PASS: all-null, legacy refusal, HTTP error, sparse chart, differing dates, stale refresh, raw unverified evidence including full-history latest_spread_report, HTML escaping, invalid numeric/schema data");
+  console.log("PASS: all-null, legacy/old-v2 timestamp-policy refusal, event=execution and event=execution+1h keep publication time/delay unknown, invented public delay refused, HTTP error, sparse chart, differing dates, stale refresh, raw unverified evidence including full-history latest_spread_report, HTML escaping, invalid numeric/schema data");
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

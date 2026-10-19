@@ -113,11 +113,31 @@ class SourceSpreadTests(unittest.TestCase):
         result = self.inspect(row())
         self.assertEqual(result["maturity_date"], "2031-12-20")
         self.assertGreater(result["remaining_years"], 5)
-        self.assertEqual(result["report_delay_seconds"], 8)
+        self.assertEqual(result["source_event_timestamp"], "2026-10-16T15:22:00Z")
+        self.assertEqual(result["source_event_timestamp_field"], "Event timestamp")
+        self.assertIsNone(result["publication_delay_seconds"])
         self.assertIsNone(result["documentation"])
         for changes in ({"Expiration Date": "2038-12-20"}, {"Execution Timestamp": "2026-10-16T15:21:52"},
                         {"Event timestamp": "bad"}, {"Expiration Date": "bad"}):
             self.assertIsNone(self.inspect(row(**changes))["spread_bp"])
+
+    def test_event_time_never_implies_dissemination_or_publication_delay(self):
+        for event_time in ("2026-10-16T15:21:52Z", "2026-10-16T16:21:52Z"):
+            with self.subTest(event_time=event_time):
+                result = self.inspect(row(**{"Event timestamp": event_time}))
+                self.assertEqual(result["source_event_timestamp"], event_time)
+                self.assertIsNone(result["dissemination_timestamp"])
+                self.assertIsNone(result["publication_delay_seconds"])
+                self.assertEqual(result["publication_delay_status"], "unavailable_no_dissemination_timestamp")
+                for old_field in ("report_timestamp", "report_timestamp_field", "report_delay_seconds"):
+                    self.assertNotIn(old_field, result)
+
+    def test_invalid_event_timestamp_has_event_specific_reason(self):
+        result = self.inspect(row(**{"Event timestamp": "invalid"}))
+        self.assertIn("invalid_source_event_timestamp", result["quality_reasons"])
+        self.assertNotIn("invalid_report_timestamp", result["quality_reasons"])
+        self.assertIsNone(result["source_event_timestamp"])
+        self.assertIsNone(result["publication_delay_seconds"])
 
 
 class LifecycleTests(unittest.TestCase):
@@ -158,6 +178,11 @@ class LifecycleTests(unittest.TestCase):
         nv = result["entities"]["NVIDIA"]
         self.assertEqual(nv["series"], [["2026-10-16", 100, 2]])
         self.assertEqual(nv["last_trade_timestamp"], "2026-10-16T16:00:00Z")
+        self.assertEqual(nv["last_source_event_timestamp"], "2026-10-16T16:01:00Z")
+        self.assertIsNone(nv["last_dissemination_timestamp"])
+        self.assertIsNone(nv["last_publication_delay_seconds"])
+        self.assertNotIn("last_report_timestamp", nv)
+        self.assertNotIn("last_report_delay_seconds", nv)
         self.assertEqual(len(result["entities"]), 12)
         self.assertIn("COREWEAVE", result["missing_entities"])
 
@@ -199,6 +224,42 @@ class IncrementalTests(unittest.TestCase):
         actual = payload([record()], rules={})
         self.assertFalse(validate.validate(actual))
         actual["entities"]["NVIDIA"]["series"] = [["2026-10-16", 100, 1]]
+        self.assertTrue(validate.validate(actual))
+
+    def test_existing_v2_raw_state_rebuild_removes_old_timestamp_semantics(self):
+        old = payload([record()], rules={})
+        del old["timestamp_policy"]
+        nv = old["entities"]["NVIDIA"]
+        nv["last_report_timestamp"] = "2026-10-16T15:22:00Z"
+        nv["last_report_delay_seconds"] = 8
+        nv["latest_report"].update(report_timestamp="2026-10-16T15:22:00Z",
+                                   report_timestamp_field="Event timestamp", report_delay_seconds=8)
+        self.assertTrue(build.compatible(old))  # Source state remains reusable.
+        self.assertTrue(validate.validate(old))  # Publication contract is obsolete.
+        late_day = date(2026, 10, 18)
+        records, files = build.collect(late_day, late_day, old,
+                                       fetcher=lambda d, **kw: fake_fetch([], day=d))
+        self.assertEqual(records, old["report_state"])
+        rebuilt = payload(records, files, rules={})
+        self.assertEqual(rebuilt["schema_version"], 2)
+        self.assertEqual(rebuilt["timestamp_policy"], "event-time-is-not-publication-time")
+        self.assertFalse(validate.validate(rebuilt))
+        forbidden = {"report_timestamp", "report_timestamp_field", "report_delay_seconds",
+                     "last_report_timestamp", "last_report_delay_seconds"}
+        def check_tree(value):
+            if isinstance(value, dict):
+                self.assertFalse(forbidden.intersection(value))
+                for child in value.values():
+                    check_tree(child)
+            elif isinstance(value, list):
+                for child in value:
+                    check_tree(child)
+        check_tree(rebuilt)
+
+    def test_validator_requires_timestamp_policy_even_for_all_null_data(self):
+        actual = payload([record()], rules={})
+        self.assertFalse(validate.validate(actual))
+        del actual["timestamp_policy"]
         self.assertTrue(validate.validate(actual))
 
     def test_latest_raw_spread_is_separate_from_coupon_only_latest_report(self):
