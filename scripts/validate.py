@@ -1,56 +1,50 @@
-"""Hold-out check on the upfront -> par-spread inversion.
-
-For every entity-day that contains at least one directly quoted spread, rebuild
-that day's level using ONLY the upfront-quoted trades (anchored on the previous
-day, exactly as the live pipeline does) and compare it to the quoted spreads.
-That isolates the model error from the data.
-
-    python scripts/validate.py
-"""
-
+"""Offline invariants for published direct-only data and source-state rebuild."""
 from __future__ import annotations
-
-import os
-import statistics
+import argparse
+import json
+import math
 import sys
-from datetime import date, datetime, timezone
+from datetime import date
+from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from build_data import DATA_POLICY, OUT, SCHEMA_VERSION, build_payload, compatible, load_artifacts
 
-from build_data import HISTORY_START, WATCHLIST, collect, resolve_day
+
+def validate(payload: dict) -> list[str]:
+    if not compatible(payload):
+        return ["Legacy or incompatible schema/report state"]
+    rebuilt = build_payload(payload["report_state"], payload["coverage"]["files"],
+                            start=date.fromisoformat(payload["coverage"]["start"]),
+                            end=date.fromisoformat(payload["coverage"]["end"]), now=payload["updated"])
+    errors = []
+    for field in ("entities", "missing_entities", "methodology_details", "coverage"):
+        if payload.get(field) != rebuilt[field]:
+            errors.append(f"{field} differs from a fresh direct-only rebuild")
+    for key, entity in payload["entities"].items():
+        for point in entity["series"]:
+            if not isinstance(point[1], (int, float)) or not math.isfinite(point[1]):
+                errors.append(f"{key} has a nonfinite/non-numeric value")
+            if point[2] < 1:
+                errors.append(f"{key} has an empty aggregate")
+        if entity["last"] is None and (entity["last_date"] is not None or entity["trades"]):
+            errors.append(f"{key} missing value carries misleading date/count")
+        for record in entity["recent_reports"]:
+            if record["spread_bp"] is not None and record["quality_reasons"]:
+                errors.append(f"{key} excluded report has a displayed spread")
+    return errors
 
 
 def main() -> None:
-    today = datetime.now(timezone.utc).date()
-    by_entity = collect(HISTORY_START, today)
-
-    print(f"{'entity':11s} {'days':>5} {'median err':>11} {'p90 err':>9} {'max err':>9}")
-    print("-" * 50)
-    overall = []
-    for key, *_ in WATCHLIST:
-        prev = None
-        errors = []
-        for day in sorted(by_entity[key]):
-            trades = by_entity[key][day]
-            quoted = [t["spread"] for t in trades if t["tier"] == 0]
-            derived = [t for t in trades if t["tier"] > 0]
-            if quoted and derived:
-                held = resolve_day(derived, prev)
-                if held:
-                    errors.append(abs(held[0] - statistics.median(quoted) * 1e4))
-            resolved = resolve_day(trades, prev)
-            if resolved:
-                prev = resolved[0] / 1e4
-        if errors:
-            errors.sort()
-            overall += errors
-            p90 = errors[int(0.9 * (len(errors) - 1))]
-            print(f"{key:11s} {len(errors):5d} {statistics.median(errors):10.2f}bp "
-                  f"{p90:8.2f}bp {errors[-1]:8.2f}bp")
-    overall.sort()
-    print("-" * 50)
-    print(f"{'ALL':11s} {len(overall):5d} {statistics.median(overall):10.2f}bp "
-          f"{overall[int(0.9 * (len(overall) - 1))]:8.2f}bp {overall[-1]:8.2f}bp")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("path", nargs="?", default=OUT)
+    args = ap.parse_args()
+    errors = validate(load_artifacts(args.path))
+    for error in errors:
+        print(error, file=sys.stderr)
+    if errors:
+        raise SystemExit(1)
+    print(f"Validated schema {SCHEMA_VERSION}, {DATA_POLICY}, all entities and retained-state recomputation")
 
 
 if __name__ == "__main__":

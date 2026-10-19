@@ -1,38 +1,33 @@
-"""Build docs/data/cds.json from DTCC public dissemination files.
+"""Build an auditable direct-report-only CDS dataset, never a modeled spread.
 
-Usage:
-    python scripts/build_data.py                 # incremental (last 10 days)
-    python scripts/build_data.py --full          # rebuild history from scratch
-    python scripts/build_data.py --since 2026-01-01
+Unknown units/economic meaning stay null. Daily values, if verified, are
+medians in a 4–6 remaining-year bucket, not a synthetic 5Y benchmark.
 """
-
 from __future__ import annotations
-
 import argparse
+import copy
+import hashlib
 import json
+import math
 import os
 import re
 import statistics
 import sys
+from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from cds import spreads_from_upfront
-from dtcc import business_days, fetch_day
+from dtcc import calendar_days, fetch_day_result, utc_now
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "docs", "data", "cds.json")
+STATE_OUT = os.path.join(ROOT, "docs", "data", "report-state.json")
 HISTORY_START = date(2025, 10, 1)
-
-# (key, display name, ticker, reference-entity names as they appear in the feed,
-# uppercased and stripped of punctuation). Reporting parties spell the same
-# entity several ways, and near-miss names in the same file are DIFFERENT credits
-# - CoreWeave's loan CDS ("COREWEAVE FINANCING-DDTL") and SPVs trade hundreds of
-# basis points away from CoreWeave Inc, so the match has to be exact.
+SCHEMA_VERSION = 2
+DATA_POLICY = "direct-reported-only"
 WATCHLIST = [
     ("NVIDIA", "NVIDIA", "NVDA", {"NVIDIACORP", "NVIDIACORPORATION"}),
-    ("ORACLE", "Oracle", "ORCL", {"ORACLECORPORATION", "ORACLECORP", "ORACLECOP"}),
+    ("ORACLE", "Oracle", "ORCL", {"ORACLECORPORATION", "ORACLECORP"}),
     ("COREWEAVE", "CoreWeave", "CRWV", {"COREWEAVEINC"}),
     ("BROADCOM", "Broadcom", "AVGO", {"BROADCOMINC"}),
     ("AMD", "AMD", "AMD", {"ADVANCEDMICRODEVICESINC"}),
@@ -44,203 +39,419 @@ WATCHLIST = [
     ("DELL", "Dell Technologies", "DELL", {"DELLINC"}),
     ("INTEL", "Intel", "INTC", {"INTELCORPORATION", "INTELCORP"}),
 ]
-
-# senior unsecured single-name corporate CDS; excludes loan CDS and index trades
 FISN = "NA/CDS Corp SN Sr"
-
-TENOR_MIN, TENOR_MAX = 4.0, 6.0  # years to maturity that count as the 5Y benchmark
-ANCHOR_BAND = 0.5  # drop trades more than +-50% away from the day's anchor
-# a few reports put something other than a par spread in the spread field
-# (CoreWeave prints of 1-4bp against a 500bp coupon); no real 5Y corporate CDS
-# trades that tight, so treat those rows as upfront-quoted instead
-QUOTE_MIN, QUOTE_MAX = 0.0005, 0.30
-
-
-def norm(name: str) -> str:
-    return re.sub(r"[^A-Z]", "", (name or "").upper())
-
-
+TENOR_MIN, TENOR_MAX = 4.0, 6.0
 ENTITY_OF = {alias: key for key, _, _, aliases in WATCHLIST for alias in aliases}
 
+# Fail closed. Both unit AND economic meaning must be verified in the actual
+# DTCC SEC product feed before a rule may be added. Another SDR is insufficient.
+NOTATION_RULES: dict[str, dict] = {}
+NOTATION_VERIFICATION = {
+    "status": "unverified",
+    "reference_url": "https://dtcclearning.com/products-and-services/repository-services/gtr-cftc-canada-sec.html",
+    "checked_at": "2026-10-19",
+    "detail": "Current DTCC SEC Message Specification and PPD Transformation/Scaling Help require login. Public raw Spread-Leg notation and economic meaning are not both certified; no basis-point value is inferred.",
+    "public_guide_url": "https://kgc0418-tdw-data-0.s3.amazonaws.com/gtr/static/gtr/docs/RT_PPD_quick_ref_guide.pdf",
+}
+RAW_FIELDS = (
+    "Dissemination Identifier", "Original Dissemination Identifier", "Action type",
+    "Event type", "Event timestamp", "Amendment indicator", "Execution Timestamp",
+    "Effective Date", "Expiration Date", "Underlying Asset Name", "UPI FISN",
+    "UPI Underlier Name", "Unique Product Identifier", "Underlier ID-Leg 1",
+    "Underlier ID source-Leg 1", "Notional currency-Leg 1", "Notional currency-Leg 2",
+    "Spread-Leg 1", "Spread-Leg 2", "Spread notation-Leg 1", "Spread notation-Leg 2",
+    "Spread currency-Leg 1", "Spread currency-Leg 2", "Fixed rate-Leg 1", "Fixed rate-Leg 2",
+    "Other payment amount", "Other payment type", "Other payment currency",
+    "Notional amount-Leg 1", "Notional amount-Leg 2", "Price", "Price notation",
+    "Package indicator", "Non-standardized term indicator",
+)
 
-def num(raw: str | None) -> float | None:
-    if not raw:
-        return None
+
+def norm(name: str | None) -> str:
+    return re.sub(r"[^A-Z0-9]", "", (name or "").upper())
+
+
+def number(raw: str | None) -> tuple[float | None, str | None]:
+    text = (raw or "").strip()
+    if not text:
+        return None, "missing"
     try:
-        return float(raw.replace(",", "").replace("+", "").strip())
+        value = float(text.replace(",", ""))
+    except (ValueError, OverflowError):
+        return None, "invalid"
+    if not math.isfinite(value):
+        return None, "nonfinite"
+    if not re.fullmatch(r"[+-]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", text):
+        return None, "invalid"
+    return value, None
+
+
+def timestamp(raw: str | None) -> datetime | None:
+    try:
+        value = datetime.fromisoformat((raw or "").replace("Z", "+00:00"))
+        return value.astimezone(timezone.utc) if value.tzinfo else None
     except ValueError:
         return None
 
 
-def parse_trade(row: dict) -> dict | None:
-    """Turn one disseminated row into a 5Y CDS observation, or None."""
-    if row.get("Action type") != "NEWT" or row.get("Event type") != "TRAD":
-        return None
-    if (row.get("UPI FISN") or "").strip() != FISN:
-        return None
-    key = ENTITY_OF.get(norm(row.get("Underlying Asset Name")))
-    if key is None:
-        return None
+def iso(value: datetime | None) -> str | None:
+    return value.isoformat().replace("+00:00", "Z") if value else None
 
+
+def state_record(row: dict, source: dict) -> dict:
+    return {"raw": {field: (row.get(field) or "").strip() for field in RAW_FIELDS},
+            "source_files": [{"date": source["date"], "url": source["url"]}]}
+
+
+def identity(record: dict) -> str:
+    return hashlib.sha256(json.dumps(record["raw"], sort_keys=True,
+                                     separators=(",", ":")).encode()).hexdigest()
+
+
+def deduplicate(records: list[dict]) -> list[dict]:
+    unique = {}
+    for record in records:
+        digest = identity(record)
+        if digest not in unique:
+            unique[digest] = copy.deepcopy(record)
+        else:
+            seen = {s["date"] for s in unique[digest]["source_files"]}
+            unique[digest]["source_files"].extend(s for s in record["source_files"] if s["date"] not in seen)
+    for record in unique.values():
+        record["source_files"].sort(key=lambda s: s["date"])
+    return sorted(unique.values(), key=lambda r: (r["raw"].get("Event timestamp", ""), identity(r)))
+
+
+def retain_relevant(records: list[dict], extra: list[dict]) -> list[dict]:
+    """Preserve exact entities and connected lifecycle rows, including sparse ones."""
+    selected = list(records)
+    pending = []
+    for record in extra:
+        if norm(record["raw"].get("Underlying Asset Name")) in ENTITY_OF:
+            selected.append(record)
+        elif record["raw"].get("Original Dissemination Identifier"):
+            pending.append(record)
+    known = {r["raw"].get(field) for r in selected for field in (
+        "Dissemination Identifier", "Original Dissemination Identifier") if r["raw"].get(field)}
+    while pending:
+        remaining = []
+        for record in pending:
+            ids = {record["raw"].get(field) for field in (
+                "Dissemination Identifier", "Original Dissemination Identifier")} - {None, ""}
+            if ids & known:
+                selected.append(record)
+                known.update(ids)
+            else:
+                remaining.append(record)
+        if len(remaining) == len(pending):
+            break
+        pending = remaining
+    return deduplicate(selected)
+
+
+def lifecycle_reasons(records: list[dict]) -> dict[str, list[str]]:
+    """Exclude amended/error chains, not an unverified replacement or both rows."""
+    parent = {}
+    def find(item):
+        parent.setdefault(item, item)
+        if parent[item] != item:
+            parent[item] = find(parent[item])
+        return parent[item]
+    def union(a, b):
+        parent[find(a)] = find(b)
+    ids_to_records = defaultdict(list)
+    for record in records:
+        raw = record["raw"]
+        rid = raw.get("Dissemination Identifier")
+        oid = raw.get("Original Dissemination Identifier")
+        node = rid or "missing:" + identity(record)
+        find(node)
+        if oid:
+            union(node, oid)
+        if rid:
+            ids_to_records[rid].append(record)
+    blocked = defaultdict(set)
+    for record in records:
+        raw = record["raw"]
+        rid = raw.get("Dissemination Identifier")
+        root = find(rid or "missing:" + identity(record))
+        if not rid:
+            blocked[root].add("missing_report_id")
+        if raw.get("Original Dissemination Identifier") or raw.get("Action type") != "NEWT" or raw.get("Amendment indicator") not in {"", "N", "FALSE", "false"}:
+            blocked[root].add("amended_lifecycle_unverified")
+        if raw.get("Action type") == "EROR":
+            blocked[root].add("error_lifecycle")
+    for rid, group in ids_to_records.items():
+        if len(group) > 1:
+            blocked[find(rid)].add("conflicting_duplicate_id")
+    return {identity(record): sorted(blocked[find(record["raw"].get("Dissemination Identifier") or "missing:" + identity(record))])
+            for record in records}
+
+
+def inspect_record(record: dict, lifecycle: list[str] | None = None,
+                   rules: dict[str, dict] | None = None) -> dict:
+    raw = record["raw"]
+    reasons = list(lifecycle or [])
+    key = ENTITY_OF.get(norm(raw.get("Underlying Asset Name")))
+    currencies = {raw.get(f"Notional currency-Leg {i}") for i in (1, 2)} - {None, ""}
+    currency = next(iter(currencies)) if len(currencies) == 1 else "/".join(sorted(currencies)) or None
+    scope_reasons = []
+    if not key:
+        scope_reasons.append("unmatched_exact_entity")
+    if raw.get("UPI FISN") != FISN:
+        scope_reasons.append("not_senior_corporate_cds")
+    if currencies != {"USD"}:
+        scope_reasons.append("not_usd")
+    execution = timestamp(raw.get("Execution Timestamp"))
+    event_time = timestamp(raw.get("Event timestamp"))
+    maturity = None
     try:
-        ts = datetime.fromisoformat(row["Execution Timestamp"].replace("Z", "+00:00"))
-        maturity = date.fromisoformat(row["Expiration Date"])
-    except (KeyError, ValueError):
-        return None
-
-    traded = ts.date()
-    years = (maturity - traded).days / 365.25
-    if not TENOR_MIN <= years <= TENOR_MAX:
-        return None
-
-    spread = num(row.get("Spread-Leg 1")) or num(row.get("Spread-Leg 2"))
-    if spread and QUOTE_MIN <= spread <= QUOTE_MAX:  # quoted in spread terms already
-        return {"key": key, "ts": ts, "date": traded, "spread": spread, "tier": 0}
-
-    coupon = num(row.get("Fixed rate-Leg 1")) or num(row.get("Fixed rate-Leg 2"))
-    notional_raw = row.get("Notional amount-Leg 1") or ""
-    notional = num(notional_raw)
-    cash = num(row.get("Other payment amount"))
-    if not coupon or not notional or not cash:
-        return None
-    if "UFRO" not in (row.get("Other payment type") or ""):
-        return None
-
-    candidates = spreads_from_upfront(traded, maturity, coupon, cash / notional)
-    if not candidates:
-        return None
-    # notional is capped at 5,000,000+ in the public feed, so a block trade can
-    # scale the implied spread; tier 2 trades get a wider trust discount later.
-    tier = 1 if "+" not in notional_raw else 2
-    return {"key": key, "ts": ts, "date": traded, "candidates": candidates, "tier": tier}
-
-
-def resolve_day(trades: list[dict], prev: float | None) -> tuple[float, list[dict]] | None:
-    """Pick the spread branch for each trade and return (median bp, kept trades)."""
-    explicit = [t["spread"] for t in trades if t["tier"] == 0]
-    anchor = statistics.median(explicit) if explicit else prev
-    if anchor is None:
-        # no explicit print and no prior level: fall back to the sub-coupon branch,
-        # which is the right one for an investment-grade name at a 100bp coupon
-        anchor = statistics.median(
-            [t["candidates"][0] for t in trades if t["tier"] > 0] or [0]
-        )
-        if not anchor:
-            return None
-
-    resolved = [
-        {**t, "spread": t["spread"] if t["tier"] == 0
-         else min(t["candidates"], key=lambda c: abs(c - anchor))}
-        for t in trades
-    ]
-    kept = [t for t in resolved
-            if t["tier"] == 0 or abs(t["spread"] - anchor) <= ANCHOR_BAND * anchor]
-    # if the anchor rejects everything it is the anchor that is stale, not the
-    # trades - fall back to the day's own prints so the series re-baselines
-    kept = kept or resolved
-    if not kept:
-        return None
-    return statistics.median([t["spread"] for t in kept]) * 1e4, kept
-
-
-def collect(start: date, end: date) -> dict[str, dict[date, list[dict]]]:
-    by_entity: dict[str, dict[date, list[dict]]] = {k: {} for k, *_ in WATCHLIST}
-    for d in business_days(start, end):
-        rows = fetch_day(d)
-        if rows is None:
+        maturity = date.fromisoformat(raw.get("Expiration Date", ""))
+    except ValueError:
+        scope_reasons.append("invalid_maturity")
+    if not execution:
+        scope_reasons.append("invalid_execution_timestamp")
+    years = (maturity - execution.date()).days / 365.25 if maturity and execution else None
+    if years is not None and not TENOR_MIN <= years <= TENOR_MAX:
+        scope_reasons.append("outside_4_6_year_bucket")
+    reasons.extend(scope_reasons)
+    if not event_time:
+        reasons.append("invalid_report_timestamp")
+    if raw.get("Action type") != "NEWT" or raw.get("Event type") != "TRAD":
+        reasons.append("not_new_trade_report")
+    if raw.get("Package indicator", "").upper() not in {"", "FALSE", "N"}:
+        reasons.append("package_trade_unverified")
+    values = []
+    legs = []
+    rules = NOTATION_RULES if rules is None else rules
+    for leg in (1, 2):
+        value_raw = raw.get(f"Spread-Leg {leg}", "")
+        notation = raw.get(f"Spread notation-Leg {leg}", "")
+        spread_currency = raw.get(f"Spread currency-Leg {leg}", "")
+        legs.append({"leg": leg, "raw": value_raw or None, "notation": notation or None,
+                     "currency": spread_currency or None})
+        if not value_raw:
             continue
-        for row in rows:
-            t = parse_trade(row)
-            # a day's file also carries trades executed earlier (late reports and
-            # corrections). Taking them would rewrite a past day from a partial
-            # sample, so an incremental run stays inside its own window.
-            if t and start <= t["date"] <= end:
-                by_entity[t["key"]].setdefault(t["date"], []).append(t)
-    return by_entity
+        value, error = number(value_raw)
+        if error:
+            reasons.append(f"{error}_reported_spread")
+            continue
+        rule = rules.get(notation)
+        if not rule:
+            reasons.append("unverified_spread_notation")
+            continue
+        if not rule.get("economic_meaning_verified"):
+            reasons.append("unverified_spread_economic_meaning")
+            continue
+        if spread_currency and spread_currency != "USD":
+            reasons.append("spread_currency_mismatch")
+            continue
+        converted = value * rule["multiplier_to_bp"]
+        if not math.isfinite(converted):
+            reasons.append("nonfinite_reported_spread")
+            continue
+        values.append(converted)
+    if not any(leg["raw"] is not None for leg in legs):
+        reasons.append("no_reported_spread")
+    if len(set(values)) > 1:
+        reasons.append("ambiguous_multi_leg_spread")
+    reasons = sorted(set(reasons))
+    delay = (event_time - execution).total_seconds() if event_time and execution else None
+    return {
+        "entity": key, "report_id": raw.get("Dissemination Identifier") or None,
+        "original_report_id": raw.get("Original Dissemination Identifier") or None,
+        "action": raw.get("Action type"), "event": raw.get("Event type"),
+        "entity_name": raw.get("Underlying Asset Name") or None,
+        "entity_alias": norm(raw.get("Underlying Asset Name")), "currency": currency,
+        "execution_timestamp": iso(execution), "report_timestamp": iso(event_time),
+        "report_timestamp_field": "Event timestamp", "report_delay_seconds": delay,
+        "maturity_date": maturity.isoformat() if maturity else None,
+        "remaining_years": round(years, 6) if years is not None else None,
+        "upi_fisn": raw.get("UPI FISN") or None, "upi": raw.get("Unique Product Identifier") or None,
+        "underlier_id": raw.get("Underlier ID-Leg 1") or None,
+        "underlier_id_source": raw.get("Underlier ID source-Leg 1") or None,
+        "upi_underlier_name": raw.get("UPI Underlier Name") or None,
+        "documentation": None, "documentation_status": "not_available_in_selected_public_fields",
+        "spread_legs": legs,
+        "fixed_rates": [raw.get(f"Fixed rate-Leg {i}") or None for i in (1, 2)],
+        "upfront": {"raw": raw.get("Other payment amount") or None,
+                    "type": raw.get("Other payment type") or None,
+                    "currency": raw.get("Other payment currency") or None},
+        "spread_bp": values[0] if values and not reasons else None,
+        "quality_reasons": reasons, "scope_eligible": not scope_reasons,
+        "lifecycle_status": "excluded" if lifecycle else "unamended_new_report",
+        "source_files": record["source_files"],
+    }
+
+
+def compatible(previous: dict) -> bool:
+    return (previous.get("schema_version") == SCHEMA_VERSION
+            and previous.get("data_policy") == DATA_POLICY
+            and isinstance(previous.get("report_state"), list))
+
+
+def collect(start: date, end: date, previous: dict | None = None, *,
+            offline: bool = False, fetcher=None, today: date | None = None) -> tuple[list[dict], list[dict]]:
+    previous = previous if previous and compatible(previous) else {}
+    records = copy.deepcopy(previous.get("report_state", []))
+    old_files = {f["date"]: f for f in previous.get("coverage", {}).get("files", [])}
+    new_records = []
+    fetcher = fetcher or fetch_day_result
+    for day in calendar_days(start, end):
+        result = fetcher(day, today=today or end, offline=offline)
+        meta = result.metadata
+        old_files[day.isoformat()] = meta
+        if result.rows is None:
+            continue
+        if meta["status"] in {"downloaded", "cached"}:
+            for record in records:
+                record["source_files"] = [s for s in record["source_files"] if s["date"] != day.isoformat()]
+            records = [r for r in records if r["source_files"]]
+        source = {"date": day.isoformat(), "url": meta["url"]}
+        for row in result.rows:
+            if norm(row.get("Underlying Asset Name")) in ENTITY_OF or row.get("Original Dissemination Identifier"):
+                new_records.append(state_record(row, source))
+        print(f"{day.isoformat()} {meta['status']} {len(result.rows)} rows", file=sys.stderr)
+    return retain_relevant(records, new_records), sorted(old_files.values(), key=lambda f: f["date"])
 
 
 def change(series: list, days_back: int) -> float | None:
-    """Spread change vs the last observation at least `days_back` days earlier."""
     if not series:
         return None
-    last_day = date.fromisoformat(series[-1][0])
-    cutoff = last_day - timedelta(days=days_back)
+    cutoff = date.fromisoformat(series[-1][0]) - timedelta(days=days_back)
     earlier = [p for p in series[:-1] if date.fromisoformat(p[0]) <= cutoff]
-    if not earlier:
-        return None
-    return round(series[-1][1] - earlier[-1][1], 1)
+    return round(series[-1][1] - earlier[-1][1], 4) if earlier else None
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--full", action="store_true", help="rebuild the whole history")
-    ap.add_argument("--since", help="YYYY-MM-DD start date")
-    args = ap.parse_args()
-
-    today = datetime.now(timezone.utc).date()
-    if args.since:
-        start = date.fromisoformat(args.since)
-    elif args.full:
-        start = HISTORY_START
-    else:
-        start = today - timedelta(days=10)
-
-    previous = {}
-    if not args.full and os.path.exists(OUT):
-        with open(OUT, encoding="utf-8") as fh:
-            previous = json.load(fh).get("entities", {})
-
-    by_entity = collect(start, today)
-
+def build_payload(records: list[dict], files: list[dict], *, start: date,
+                  end: date, now: str | None = None, rules=None) -> dict:
+    records = deduplicate(records)
+    lifecycle = lifecycle_reasons(records)
+    reports = [inspect_record(r, lifecycle.get(identity(r)), rules) for r in records]
     entities = {}
-    last_trades = []
     for key, name, ticker, _ in WATCHLIST:
-        old = previous.get(key, {}).get("series", [])
-        series = [p for p in old if not (start <= date.fromisoformat(p[0]) <= today)]
-        prev_level = series[-1][1] / 1e4 if series else None
-
-        for day in sorted(by_entity[key]):
-            resolved = resolve_day(by_entity[key][day], prev_level)
-            if not resolved:
-                continue
-            level_bp, kept = resolved
-            series.append([day.isoformat(), round(level_bp, 1), len(kept)])
-            prev_level = level_bp / 1e4
-            if key == "NVIDIA":
-                last_trades.extend(
-                    {"ts": t["ts"].isoformat().replace("+00:00", "Z"),
-                     "spread": round(t["spread"] * 1e4, 1),
-                     "quoted": t["tier"] == 0}
-                    for t in kept
-                )
-
-        series.sort(key=lambda p: p[0])
+        all_reports = sorted([r for r in reports if r["entity"] == key],
+                             key=lambda r: (r["report_timestamp"] or "", r["report_id"] or ""), reverse=True)
+        qualified = [r for r in all_reports if r["scope_eligible"]]
+        raw_spread_reports = [r for r in qualified if r["action"] == "NEWT" and r["event"] == "TRAD"
+                              and r["lifecycle_status"] == "unamended_new_report"
+                              and any(leg["raw"] is not None for leg in r["spread_legs"])]
+        eligible = [r for r in qualified if r["spread_bp"] is not None]
+        days = defaultdict(list)
+        for report in eligible:
+            days[report["execution_timestamp"][:10]].append(report)
+        series = [[day, round(statistics.median(r["spread_bp"] for r in group), 4), len(group)]
+                  for day, group in sorted(days.items())]
+        latest_group = days[series[-1][0]] if series else []
+        last_trade = max(latest_group, key=lambda r: r["execution_timestamp"]) if latest_group else None
+        quality = Counter(reason for r in qualified for reason in r["quality_reasons"])
         entities[key] = {
-            "name": name,
-            "ticker": ticker,
-            "series": series,
+            "name": name, "ticker": ticker, "series": series,
             "last": series[-1][1] if series else None,
             "last_date": series[-1][0] if series else None,
             "trades": series[-1][2] if series else 0,
-            "chg_1d": change(series, 1),
-            "chg_1w": change(series, 7),
-            "chg_1m": change(series, 30),
+            "chg_1d": change(series, 1), "chg_1w": change(series, 7), "chg_1m": change(series, 30),
+            "last_trade_timestamp": last_trade["execution_timestamp"] if last_trade else None,
+            "last_report_timestamp": max((r["report_timestamp"] for r in latest_group), default=None),
+            "last_report_delay_seconds": last_trade["report_delay_seconds"] if last_trade else None,
+            "latest_report": qualified[0] if qualified else None,
+            "latest_spread_report": max(raw_spread_reports, key=lambda r: (r["execution_timestamp"] or "", r["report_timestamp"] or ""), default=None),
+            "recent_reports": qualified[:40],
+            "recent_excluded_scope_reports": [r for r in all_reports if not r["scope_eligible"]][:10],
+            "quality_counts": dict(sorted(quality.items())), "eligible_report_count": len(eligible),
+            "qualifying_report_count": len(qualified), "exact_entity_report_count": len(all_reports),
+            "scope_exclusion_counts": dict(Counter(reason for r in all_reports if not r["scope_eligible"] for reason in r["quality_reasons"])),
         }
-
-    last_trades.sort(key=lambda t: t["ts"], reverse=True)
-    payload = {
-        "updated": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
-        "entities": entities,
-        "nvidia_trades": last_trades[:40],
+    successful = [f["date"] for f in files if f["status"] in {"cached", "downloaded"}]
+    failures = [f for f in files if f["status"] in {"error", "stale_cache", "offline_missing"}]
+    return {
+        "schema_version": SCHEMA_VERSION, "data_policy": DATA_POLICY,
+        "updated": now or utc_now(), "entities": entities,
+        "missing_entities": [key for key, entity in entities.items() if entity["last"] is None],
+        "methodology_details": {
+            "label": "Reported CDS spread", "aggregation": "Daily median of eligible direct public reports by UTC execution date; count means reports, not independently verified unique economic trades.",
+            "maturity_bucket": "4–6 remaining years at execution; no synthetic 5Y normalization",
+            "seniority": FISN, "currency": "USD",
+            "notation_verification": copy.deepcopy(NOTATION_VERIFICATION),
+            "lifecycle_policy": "Identical repeated reports deduplicated; conflicting IDs and entire amended/error chains excluded conservatively.",
+            "limitations": ["Public reports are not a dealer close or authenticated par-spread quotation.",
+                            "Documentation clause is not established by selected public fields; no cross-documentation adjustment is made.",
+                            "Event timestamp is preserved as a source event field; its difference from execution is not certified publication latency.",
+                            "Online runs refresh today and the prior two UTC source dates; older cached snapshots can miss later source republications until refreshed explicitly.",
+                            "Build timestamp does not imply a fresh source file or recent trade."]},
+        "coverage": {"start": start.isoformat(), "end": end.isoformat(),
+                     "last_successful_file_date": max(successful) if successful else None,
+                     "missing_files": [f["date"] for f in files if f["status"] == "not_found"],
+                     "failed_files": [{"date": f["date"], "status": f["status"], "error": f.get("error")} for f in failures],
+                     "files": files},
+        "report_state": records,
     }
 
-    os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    with open(OUT, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, separators=(",", ":"))
 
-    nv = entities["NVIDIA"]
-    print(f"NVIDIA 5Y {nv['last']}bp on {nv['last_date']} ({nv['trades']} trades), "
-          f"{len(nv['series'])} days of history -> {OUT}")
+def encode_json(payload: dict) -> bytes:
+    return (json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def write_artifacts(payload: dict, out: str = OUT, state_out: str = STATE_OUT) -> None:
+    """Keep the dashboard small; retain complete public audit state separately."""
+    state = {"schema_version": SCHEMA_VERSION, "data_policy": DATA_POLICY,
+             "report_state": payload["report_state"]}
+    raw_state = encode_json(state)
+    published = {key: value for key, value in payload.items() if key != "report_state"}
+    published.update(report_state_file=os.path.basename(state_out),
+                     report_state_sha256=hashlib.sha256(raw_state).hexdigest(),
+                     report_state_count=len(state["report_state"]))
+    for path, blob in ((state_out, raw_state), (out, encode_json(published))):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        temporary = path + ".tmp"
+        with open(temporary, "wb") as fh:
+            fh.write(blob)
+        os.replace(temporary, path)
+
+
+def load_artifacts(path: str = OUT) -> dict:
+    with open(path, encoding="utf-8") as fh:
+        payload = json.load(fh)
+    if "report_state" in payload:
+        return payload
+    state_name = payload.get("report_state_file")
+    if state_name != "report-state.json":
+        return payload  # Legacy schema will trigger a whole migration.
+    state_path = os.path.join(os.path.dirname(path), state_name)
+    with open(state_path, "rb") as fh:
+        blob = fh.read()
+    if hashlib.sha256(blob).hexdigest() != payload.get("report_state_sha256"):
+        raise ValueError("Retained report-state hash does not match dashboard artifact")
+    state = json.loads(blob)
+    if not compatible(state):
+        raise ValueError("Retained report-state policy/schema mismatch")
+    payload["report_state"] = state["report_state"]
+    return payload
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--full", action="store_true", help="Rebuild all history, discarding any modeled series")
+    ap.add_argument("--since", help="First source-file date YYYY-MM-DD")
+    ap.add_argument("--end", help="Last source-file date (default current UTC date)")
+    ap.add_argument("--offline", action="store_true", help="Use cached public files and disclose gaps")
+    args = ap.parse_args()
+    today = datetime.now(timezone.utc).date()
+    end = date.fromisoformat(args.end) if args.end else today
+    previous = {}
+    if not args.full and os.path.exists(OUT):
+        old = load_artifacts(OUT)
+        if compatible(old):
+            previous = old
+        else:
+            print("Legacy state discarded; rebuilding direct-only history", file=sys.stderr)
+    start = (date.fromisoformat(args.since) if args.since else
+             HISTORY_START if args.full or not previous else end - timedelta(days=10))
+    records, files = collect(start, end, previous, offline=args.offline, today=today)
+    coverage_start = min([start] + [date.fromisoformat(f["date"]) for f in files])
+    payload = build_payload(records, files, start=coverage_start, end=end)
+    write_artifacts(payload)
+    print(f"{len(records)} retained source reports; {sum(e['eligible_report_count'] for e in payload['entities'].values())} eligible direct spreads; {len(payload['missing_entities'])} missing entities -> {OUT}")
 
 
 if __name__ == "__main__":

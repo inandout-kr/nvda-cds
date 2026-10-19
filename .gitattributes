@@ -1,0 +1,3 @@
+# The public audit artifact is SHA256-bound to cds.json; keep bytes portable.
+docs/data/cds.json text eol=lf
+docs/data/report-state.json text eol=lf
